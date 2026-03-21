@@ -1,6 +1,7 @@
 import oci
 import os
 import csv
+from dotenv import load_dotenv
 from datetime import datetime, timezone
 from io import StringIO
 from telegram import Update, InputFile
@@ -8,9 +9,14 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
 )
 
+load_dotenv()
 # === Telegram Bot 配置 ===
-TELEGRAM_BOT_TOKEN = '放你的bot token'    # <-- 替换为你自己的 Telegram Bot Token
-ALLOWED_CHAT_IDS = None  # 可选: 写 List[int] 只允许你本人用机器人
+TELEGRAM_BOT_TOKEN = os.getenv('TG_BOT_TOKEN')  # 你的 bot token 来自 .env
+allowed_chat_ids_str = os.getenv('TG_ALLOWED_CHAT_IDS')
+ALLOWED_CHAT_IDS = None
+if allowed_chat_ids_str:
+    ALLOWED_CHAT_IDS = [int(cid.strip()) for cid in allowed_chat_ids_str.split(',') if cid.strip().isdigit()]
+
 
 # ============ OCI 原始工具逻辑（只改输出方式） ==============
 
