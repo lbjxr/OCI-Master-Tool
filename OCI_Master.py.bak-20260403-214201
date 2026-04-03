@@ -4,53 +4,17 @@ import os
 import sys
 import time
 import html
-import csv
-import logging
-import argparse
-from pathlib import Path
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import oci
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_APP_CONFIG_PATH = os.path.join(BASE_DIR, "oci_master_config.json")
 DEFAULT_APP_CONFIG_EXAMPLE_PATH = os.path.join(BASE_DIR, "oci_master_config.example.json")
-
-# Simple logger setup (overridable via --verbose or OCI_MASTER_LOG_LEVEL)
-LOGGER = logging.getLogger("oci_master")
-
-def setup_logger(level: Optional[str] = None, verbose: bool = False) -> None:
-    lvl = (level or os.environ.get("OCI_MASTER_LOG_LEVEL") or ("DEBUG" if verbose else "INFO")).upper()
-    logging.basicConfig(
-        level=getattr(logging, lvl, logging.INFO),
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
-
-
-def create_requests_session(
-    total_retries: int = 3,
-    backoff_factor: float = 0.5,
-    status_forcelist: Tuple[int, ...] = (429, 500, 502, 503, 504),
-) -> requests.Session:
-    """Create a requests Session with sane HTTP retry behavior."""
-    session = requests.Session()
-    adapter = HTTPAdapter(
-        max_retries=Retry(
-            total=total_retries,
-            backoff_factor=backoff_factor,
-            status_forcelist=status_forcelist,
-            allowed_methods=frozenset(["GET", "POST", "PUT", "DELETE", "PATCH"]),
-        )
-    )
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    return session
 
 
 def print_divider(char: str = "=", width: int = 64) -> None:
@@ -404,39 +368,72 @@ def _print_policy_table(id_domains_client) -> bool:
     return True
 
 
-def export_usage_fee(
-    app_config: Optional[Dict[str, Any]] = None,
-    show_all: bool = False,
-    csv_out: Optional[str] = None,
-) -> None:
-    """功能 2：查询本月费用账单，支持可选 CSV 导出与展开所有日期。"""
+def export_usage_fee(app_config: Optional[Dict[str, Any]] = None) -> None:
+    """功能 2：查询本月费用账单，并默认仅展示最新 1 天结果。"""
     print("\n" + "=" * 65)
     print("💰 正在查询本月费用数据...")
     try:
         app_config = app_config or load_app_config()
-        report_data = get_usage_fee_report_data(app_config)
-        # 渲染 CLI 视图
-        print(render_usage_fee_cli(report_data, show_all=show_all))
-
-        # 处理 CSV 导出
+        config = get_oci_config(app_config)
+        usage_client = oci.usage_api.UsageapiClient(config)
         output_cfg = app_config.get("output", {})
-        csv_path = csv_out or output_cfg.get("usage_fee_csv_path")
-        if not csv_path:
-            csv_dir = output_cfg.get("usage_fee_csv_dir")
-            if csv_dir:
-                month_tag = report_data["end_time"].strftime("%Y%m")
-                csv_path = os.path.join(csv_dir, f"usage_fee_{month_tag}.csv")
-        if csv_path:
-            os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-            unique_dates = report_data["unique_dates"]
-            display_days = report_data["display_days"]
-            latest_dates = set(unique_dates if show_all else unique_dates[-display_days:]) if unique_dates else set()
-            rows_to_write = [row for row in report_data["rows"] if (row[0] in latest_dates) or show_all]
-            with open(csv_path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(["date", "service", "amount", "currency"])
-                writer.writerows(rows_to_write)
-            print_kv("CSV 已导出", csv_path)
+        display_days = int(output_cfg.get("usage_fee_display_days", 1) or 1)
+
+        now_utc = datetime.now(timezone.utc)
+        start_time = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        end_time = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        request_details = oci.usage_api.models.RequestSummarizedUsagesDetails(
+            tenant_id=config["tenancy"],
+            time_usage_started=start_time,
+            time_usage_ended=end_time,
+            granularity="DAILY",
+            query_type="COST",
+            group_by=["service"],
+        )
+
+        response = usage_client.request_summarized_usages(request_details)
+        total_cost = 0.0
+        currency = "USD"
+
+        if not response.data.items:
+            print("提示：此时间段内没有产生任何费用数据。")
+            return
+
+        sorted_items = sorted(response.data.items, key=lambda x: x.time_usage_started)
+        rows: List[List[str]] = []
+        unique_dates = []
+        seen_dates = set()
+
+        for item in sorted_items:
+            date_str = item.time_usage_started.strftime("%Y-%m-%d")
+            service = getattr(item, "service", "Unknown Service") or "Unknown Service"
+            amount = getattr(item, "computed_amount", 0.0) or 0.0
+            currency = getattr(item, "currency", "USD") or "USD"
+            total_cost += amount
+
+            rows.append([date_str, truncate_text(service, 28), f"{amount:.4f}", currency])
+            if date_str not in seen_dates:
+                seen_dates.add(date_str)
+                unique_dates.append(date_str)
+
+        latest_dates = set(unique_dates[-display_days:]) if unique_dates else set()
+        display_rows = [row for row in rows if row[0] in latest_dates]
+
+        print_section("本月费用汇总", "💰")
+        print_kv("查询区间", f"{start_time.strftime('%Y-%m-%d')} ~ {end_time.strftime('%Y-%m-%d')}")
+        print_kv("账单总记录数", len(rows))
+        print_kv("涉及日期数", len(unique_dates))
+        print_kv("默认展示天数", display_days)
+        print(f"📊 本月预估总计: {total_cost:.4f} {currency}")
+
+        print_section(f"费用明细（默认仅展示最近 {display_days} 天）", "📄")
+        print(build_text_table(["日期", "服务名称", "金额", "币种"], display_rows))
+
+        if len(unique_dates) > display_days:
+            hidden_days = len(unique_dates) - display_days
+            print()
+            print(f"ℹ️ 已折叠更早的 {hidden_days} 天数据；当前默认仅展示最近 {display_days} 天。")
     except Exception as e:
         print(f"❌ 运行出错: {e}")
 
@@ -721,7 +718,6 @@ class TelegramBotRunner:
         self.poll_interval = int(self.telegram_config.get("poll_interval_seconds", 3))
         self.api_base = f"https://api.telegram.org/bot{self.bot_token}" if self.bot_token else ""
         self.last_update_id = int(self.telegram_config.get("initial_update_offset", 0))
-        self.session = create_requests_session()
 
     def validate(self) -> None:
         if not self.enabled:
@@ -730,7 +726,7 @@ class TelegramBotRunner:
             raise ValueError("Telegram Bot 缺少 bot_token 配置")
 
     def _request(self, method: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        response = self.session.post(f"{self.api_base}/{method}", json=payload or {}, timeout=60)
+        response = requests.post(f"{self.api_base}/{method}", json=payload or {}, timeout=60)
         response.raise_for_status()
         data = response.json()
         if not data.get("ok"):
@@ -1035,72 +1031,42 @@ def main_menu(app_config: Dict[str, Any]) -> None:
         os.system(clear_cmd)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(prog="OCI_Master", description="OCI 甲骨文云一键运维工具")
-    parser.add_argument("--app-config", help="指定应用配置文件路径 (默认读取环境变量 OCI_MASTER_APP_CONFIG 或同目录 oci_master_config.json)")
-    parser.add_argument("-v", "--verbose", action="store_true", help="启用 DEBUG 日志")
+def parse_args(argv: List[str]) -> Tuple[str, Optional[str]]:
+    if len(argv) >= 2:
+        if argv[1] == "telegram":
+            return "telegram", None
+        if argv[1] == "run" and len(argv) >= 3:
+            return "run", argv[2]
+    return "menu", None
 
-    sub = parser.add_subparsers(dest="cmd")
-    sub.add_parser("menu", help="交互式菜单")
-    sub.add_parser("telegram", help="启动 Telegram Bot 轮询")
 
-    sub.add_parser("user-info", help="查看当前用户详细信息")
-
-    uf = sub.add_parser("usage-fee", help="查询本月费用账单")
-    uf.add_argument("--show-all", action="store_true", help="展示全部日期，不折叠")
-    uf.add_argument("--csv-out", help="将结果另存为 CSV 路径（默认读取 output.usage_fee_csv_* 配置）")
-
-    sub.add_parser("policies", help="查询当前密码策略看板")
-
-    csp = sub.add_parser("create-safe-policy", help="创建/修复永不过期安全策略")
-    csp.add_argument("--auto-approve", action="store_true", help="无需交互确认")
-
-    dp = sub.add_parser("delete-policy", help="删除冗余密码策略")
-    dp.add_argument("name", help="策略名称")
-    dp.add_argument("--auto-approve", action="store_true", help="无需交互确认")
-
-    # 兼容旧版 run action
-    runp = sub.add_parser("run", help="兼容旧版：运行预设动作")
-    runp.add_argument("action", help="user_info|usage_fee|policies|create_safe_policy|delete_policy:<名称>")
-
-    args = parser.parse_args()
-
-    setup_logger(verbose=args.verbose)
-
-    app_config = load_app_config(args.app_config)
-
-    if args.cmd in (None, "menu"):
-        return main_menu(app_config)
-    if args.cmd == "telegram":
-        return TelegramBotRunner(app_config).run_polling()
-    if args.cmd == "user-info":
-        return get_user_info(app_config)
-    if args.cmd == "usage-fee":
-        try:
-            export_usage_fee(app_config, show_all=args.show_all, csv_out=args.csv_out)
-        except Exception as e:
-            print(f"❌ 运行出错: {e}")
-            sys.exit(1)
-        return
-    if args.cmd == "policies":
-        return list_policies(app_config)
-    if args.cmd == "create-safe-policy":
-        return create_safe_policy(app_config, auto_approve=args.auto_approve)
-    if args.cmd == "delete-policy":
-        return delete_policy(app_config, target_name=args.name, auto_approve=args.auto_approve)
-    if args.cmd == "run":
-        action = args.action
-        if action == "user_info":
-            return get_user_info(app_config)
-        if action == "usage_fee":
-            return export_usage_fee(app_config)
-        if action == "policies":
-            return list_policies(app_config)
-        if action == "create_safe_policy":
-            return create_safe_policy(app_config, auto_approve=True)
-        if action.startswith("delete_policy:"):
-            return delete_policy(app_config, target_name=action.split(":", 1)[1].strip(), auto_approve=True)
+def execute_action(action: str, app_config: Dict[str, Any]) -> None:
+    if action == "user_info":
+        get_user_info(app_config)
+    elif action == "usage_fee":
+        export_usage_fee(app_config)
+    elif action == "policies":
+        list_policies(app_config)
+    elif action == "create_safe_policy":
+        create_safe_policy(app_config, auto_approve=True)
+    elif action.startswith("delete_policy:"):
+        delete_policy(app_config, target_name=action.split(":", 1)[1].strip(), auto_approve=True)
+    else:
         raise ValueError("不支持的 action。可选: user_info, usage_fee, policies, create_safe_policy, delete_policy:<名称>")
+
+
+def main() -> None:
+    app_config = load_app_config()
+    mode, action = parse_args(sys.argv)
+
+    if mode == "telegram":
+        TelegramBotRunner(app_config).run_polling()
+        return
+    if mode == "run" and action:
+        execute_action(action, app_config)
+        return
+
+    main_menu(app_config)
 
 
 if __name__ == "__main__":
