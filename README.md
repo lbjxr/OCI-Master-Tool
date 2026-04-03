@@ -131,3 +131,10 @@ python3 OCI_Master.py
 - 功能 4：核心功能。智能克隆官方 standardPasswordPolicy 的安全要求（如大小写、长度限制），并生成优先级最高的永不过期策略。
 
 - 功能 5：带防呆确认的策略清理工具，用于删除测试产生的多余策略，系统级保护策略会自动拦截删除以防系统崩溃。
+
+---
+Updates (2026-04-03):
+- Replaced OCI_Master.py with enhanced version (user/domain details, policy table, CSV export, Telegram helper hooks)
+- Added oci_master_config.example.json (sanitized). Copy to oci_master_config.json and fill in real values.
+- Added requirements.txt (oci, requests). Install via: pip install -r requirements.txt
+- .gitignore updated to exclude oci_master_config.json and .env

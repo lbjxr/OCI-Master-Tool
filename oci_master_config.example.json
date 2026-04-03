@@ -1,0 +1,28 @@
+{
+  "oci": {
+    "config_file": "/root/.oci/config",
+    "profile_name": "DEFAULT",
+    "identity_domain_name": "Default"
+  },
+  "output": {
+    "directory": "/root/.oci/Oracle",
+    "cost_report_filename": "oci_costs_{year}_{month}.csv"
+  },
+  "policy": {
+    "create_safe_policy": {
+      "source_policy_name": "standardPasswordPolicy",
+      "name": "NeverExpireStandard",
+      "description": "基于 Standard 规则克隆，由 API 强制设为永不过期 (Priority 1)",
+      "priority": 1,
+      "password_expires_after": 0
+    }
+  },
+  "telegram": {
+    "enabled": true,
+    "bot_token": "REDACTED",
+    "allowed_chat_ids": ["REDACTED"],
+    "allowed_user_ids": ["REDACTED"],
+    "poll_interval_seconds": 3,
+    "initial_update_offset": 0
+  }
+}
