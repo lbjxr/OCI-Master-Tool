@@ -154,6 +154,55 @@ python3 OCI_Master.py
 
 仅保留一个入口脚本 OCI_Master.py。以下为推荐运行方式：
 
+### 🔐 安全配置（推荐）
+
+#### 环境变量优先级
+
+为保护敏感信息，脚本支持通过**环境变量**配置 Telegram Bot Token，优先级高于配置文件：
+
+```bash
+# 方式 1：临时设置（当前会话有效）
+export OCI_MASTER_BOT_TOKEN="your_bot_token_here"
+python3 OCI_Master.py telegram
+
+# 方式 2：systemd 服务环境变量（推荐，见下文）
+```
+
+**优先级规则**：
+1. 环境变量 `OCI_MASTER_BOT_TOKEN`（最高）
+2. 配置文件 `oci_master_config.json` 中的 `telegram.bot_token`
+
+#### Telegram 白名单授权说明
+
+脚本支持双重白名单校验，保护 Bot 免受未授权访问：
+
+- **`allowed_chat_ids`**：允许的聊天/群组 ID 列表
+- **`allowed_user_ids`**：允许的用户 ID 列表
+
+**授权逻辑**：
+- 如果配置了 `allowed_chat_ids`，消息必须来自白名单内的聊天
+- 如果配置了 `allowed_user_ids`，消息必须来自白名单内的用户
+- 两者可同时配置（严格模式）或都不配置（开放模式，不推荐）
+- 未授权请求会被拒绝并记录日志（`LOGGER.warning`）
+
+**获取 Chat ID 和 User ID**：
+```bash
+# 发送 /start 给 @userinfobot，会返回你的 user_id
+# 或使用 @getidsbot 查询 chat_id
+```
+
+示例配置（`oci_master_config.json`）：
+```json
+{
+  "telegram": {
+    "enabled": true,
+    "bot_token": "留空，改用环境变量",
+    "allowed_chat_ids": ["123456789", "-1001234567890"],
+    "allowed_user_ids": ["987654321"]
+  }
+}
+```
+
 ### 方式 A：systemd 服务（推荐）
 
 ```bash
@@ -167,6 +216,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/root/.openclaw/workspace/tmp/OCI-Master-Tool
 Environment=OCI_MASTER_APP_CONFIG=/root/oci_master_config.json
+Environment=OCI_MASTER_BOT_TOKEN=你的_bot_token_这里
 ExecStart=/usr/bin/python3 /root/.openclaw/workspace/tmp/OCI-Master-Tool/OCI_Master.py telegram
 Restart=always
 RestartSec=5s
@@ -180,6 +230,18 @@ User=root
 WantedBy=multi-user.target
 EOF
 ```
+
+**安全提示**：
+- 将 `你的_bot_token_这里` 替换为实际 Token
+- 或使用 systemd 环境文件（更安全）：
+  ```bash
+  # 创建环境文件
+  echo 'OCI_MASTER_BOT_TOKEN=你的_token' > /etc/oci-master.env
+  chmod 600 /etc/oci-master.env
+  
+  # 修改 service 文件，替换 Environment= 行为：
+  # EnvironmentFile=/etc/oci-master.env
+  ```
 
 ```bash
 systemctl daemon-reload
