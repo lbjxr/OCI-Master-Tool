@@ -22,6 +22,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_APP_CONFIG_PATH = os.path.join(BASE_DIR, "oci_master_config.json")
 DEFAULT_APP_CONFIG_EXAMPLE_PATH = os.path.join(BASE_DIR, "oci_master_config.example.json")
 
+# Constants
+TELEGRAM_MAX_MESSAGE_LENGTH = 3900
+DEFAULT_DISPLAY_DAYS = 1
+
 # Simple logger setup (overridable via --verbose or OCI_MASTER_LOG_LEVEL)
 LOGGER = logging.getLogger("oci_master")
 
@@ -163,7 +167,11 @@ def load_app_config(config_path: Optional[str] = None) -> Dict[str, Any]:
         )
 
     with open(target_path, "r", encoding="utf-8") as file:
-        return json.load(file)
+        cfg = json.load(file)
+    # 基础配置校验
+    if "oci" not in cfg:
+        raise ValueError("配置文件缺少必填字段: oci")
+    return cfg
 
 
 def get_oci_config(app_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -446,7 +454,7 @@ def get_usage_fee_report_data(app_config: Optional[Dict[str, Any]] = None) -> Di
     config = get_oci_config(app_config)
     usage_client = oci.usage_api.UsageapiClient(config)
     output_cfg = app_config.get("output", {})
-    display_days = int(output_cfg.get("usage_fee_display_days", 1) or 1)
+    display_days = int(output_cfg.get("usage_fee_display_days", DEFAULT_DISPLAY_DAYS) or DEFAULT_DISPLAY_DAYS)
 
     now_utc = datetime.now(timezone.utc)
     start_time = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -498,6 +506,18 @@ def render_usage_fee_cli(report_data: Dict[str, Any], show_all: bool = False) ->
     unique_dates = report_data["unique_dates"]
     display_days = report_data["display_days"]
 
+    if not unique_dates:
+        return "\n".join([
+            "\n" + "=" * 65,
+            "💰 正在查询本月费用数据...",
+            "",
+            "=" * 64,
+            "💰 本月费用汇总",
+            "=" * 64,
+            f"查询区间                         : {report_data['start_time'].strftime('%Y-%m-%d')} ~ {report_data['end_time'].strftime('%Y-%m-%d')}",
+            "📊 本月暂无费用数据",
+        ])
+
     latest_dates = set(unique_dates if show_all else unique_dates[-display_days:]) if unique_dates else set()
     display_rows = [
         [row[0], truncate_text(row[1], 28), row[2], row[3]]
@@ -535,6 +555,13 @@ def render_usage_fee_telegram(report_data: Dict[str, Any], show_all: bool = Fals
     rows = report_data["rows"]
     unique_dates = report_data["unique_dates"]
     display_days = report_data["display_days"]
+
+    if not unique_dates:
+        return "\n".join([
+            "<b>💰 本月费用汇总</b>",
+            f"查询区间: <code>{report_data['start_time'].strftime('%Y-%m-%d')} ~ {report_data['end_time'].strftime('%Y-%m-%d')}</code>",
+            "📊 本月暂无费用数据"
+        ])
 
     latest_dates = set(unique_dates if show_all else unique_dates[-display_days:]) if unique_dates else set()
     display_rows = [
@@ -715,7 +742,7 @@ class TelegramBotRunner:
         self.app_config = app_config
         self.telegram_config = app_config.get("telegram", {})
         self.enabled = self.telegram_config.get("enabled", False)
-        self.bot_token = self.telegram_config.get("bot_token", "")
+        self.bot_token = os.environ.get("OCI_MASTER_BOT_TOKEN") or self.telegram_config.get("bot_token", "")
         self.allowed_chat_ids = {str(item) for item in self.telegram_config.get("allowed_chat_ids", [])}
         self.allowed_user_ids = {str(item) for item in self.telegram_config.get("allowed_user_ids", [])}
         self.poll_interval = int(self.telegram_config.get("poll_interval_seconds", 3))
@@ -730,7 +757,7 @@ class TelegramBotRunner:
             raise ValueError("Telegram Bot 缺少 bot_token 配置")
 
     def _request(self, method: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        response = self.session.post(f"{self.api_base}/{method}", json=payload or {}, timeout=60)
+        response = self.session.post(f"{self.api_base}/{method}", json=payload or {}, timeout=(5, 60))
         response.raise_for_status()
         data = response.json()
         if not data.get("ok"):
@@ -753,7 +780,7 @@ class TelegramBotRunner:
         parse_mode: Optional[str] = None,
         reply_markup: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        max_len = 3900
+        max_len = TELEGRAM_MAX_MESSAGE_LENGTH
         chunks = [text[i:i + max_len] for i in range(0, len(text), max_len)] or ["(空响应)"]
         last_response: Dict[str, Any] = {}
         for chunk in chunks:
@@ -820,9 +847,14 @@ class TelegramBotRunner:
         chat_id = str(safe_get(safe_get(message, "chat", {}), "id", ""))
         user_id = str(safe_get(safe_get(message, "from", {}), "id", ""))
 
-        chat_ok = not self.allowed_chat_ids or chat_id in self.allowed_chat_ids
-        user_ok = not self.allowed_user_ids or user_id in self.allowed_user_ids
-        return chat_ok and user_ok
+        # 只要配置了白名单，就必须匹配
+        if self.allowed_chat_ids and chat_id not in self.allowed_chat_ids:
+            LOGGER.warning(f"Unauthorized chat_id: {chat_id}")
+            return False
+        if self.allowed_user_ids and user_id not in self.allowed_user_ids:
+            LOGGER.warning(f"Unauthorized user_id: {user_id}")
+            return False
+        return True
 
     def build_help_text(self) -> str:
         return (
