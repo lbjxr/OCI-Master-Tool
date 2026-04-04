@@ -146,3 +146,6 @@ python3 OCI_Master.py
   - 安装：pip install -r requirements.txt
 - 更新 .gitignore
   - 忽略 oci_master_config.json、.env、__pycache__/，避免提交敏感信息或缓存文件
+
+
+> 说明：自 2026-04-04 起统一仅保留一个入口 `OCI_Master.py`，所有示例以该文件为准。
