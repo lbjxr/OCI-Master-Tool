@@ -149,3 +149,40 @@ python3 OCI_Master.py
 
 
 > 说明：自 2026-04-04 起统一仅保留一个入口 `OCI_Master.py`，所有示例以该文件为准。
+
+## 部署与运行（单一入口 OCI_Master.py）
+
+仅保留一个入口脚本 OCI_Master.py。以下为推荐运行方式：
+
+### 方式 A：systemd 服务（推荐）
+
+```bash
+cat >/etc/systemd/system/oci-master-telegram.service <<'EOF'
+[Unit]
+Description=OCI Master Telegram runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/.openclaw/workspace/tmp/OCI-Master-Tool
+Environment=OCI_MASTER_APP_CONFIG=/root/oci_master_config.json
+ExecStart=/usr/bin/python3 /root/.openclaw/workspace/tmp/OCI-Master-Tool/OCI_Master.py telegram
+Restart=always
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=15
+StandardOutput=journal
+StandardError=journal
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+```bash
+systemctl daemon-reload
+systemctl enable --now oci-master-telegram.service
+systemctl --no-pager -l status oci-master-telegram.service
+```
