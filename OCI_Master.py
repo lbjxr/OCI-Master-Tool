@@ -990,11 +990,7 @@ def render_audit_events_telegram(events: List[Any], limit: int = 10) -> str:
     if not events:
         return "📭 <b>未找到审计事件</b>"
     
-    # 调试：记录第一个事件的完整内容
-    if events and isinstance(events[0], dict):
-        import json
-        LOGGER.info(f"审计事件字段: {list(events[0].keys())}")
-        LOGGER.info(f"第一条事件完整数据: {json.dumps(events[0], ensure_ascii=False, indent=2)[:1000]}")
+    # 审计事件渲染（字段映射已验证）
     
     parts = [
         f"<b>📋 审计事件 (最近 {min(len(events), limit)} 条)</b>\n",
