@@ -955,31 +955,27 @@ def _print_audit_events_table(events: List[Any]) -> None:
             except:
                 pass
                 
-        event_type = safe_get_any(event, "eventType", default="N/A")
+        # Identity Domains 使用 message 字段
+        event_message = safe_get_any(event, "message", default="N/A")
         
-        # 获取用户信息
-        actor = safe_get_any(event, "actor", default={})
-        if isinstance(actor, dict):
-            user_name = actor.get("displayName") or actor.get("value", "N/A")
-        else:
-            user_name = str(actor) if actor else "N/A"
+        # 获取用户信息（actorDisplayName 或 actorName）
+        user_name = (safe_get_any(event, "actorDisplayName") or 
+                    safe_get_any(event, "actorName") or "N/A")
             
-        # 获取来源 IP
-        source_ip = safe_get_any(event, "sourceIp", default="N/A")
+        # 获取来源 IP（clientIp）
+        source_ip = safe_get_any(event, "clientIp", default="N/A")
         
-        # 获取目标资源
-        target = safe_get_any(event, "target", default={})
-        if isinstance(target, dict):
-            target_name = target.get("displayName") or target.get("value", "N/A")
-        else:
-            target_name = str(target) if target else "N/A"
+        # 获取目标资源（如果有）
+        service_name = safe_get_any(event, "serviceName", default="")
+        event_id = safe_get_any(event, "eventId", default="")
+        target_name = service_name or event_id or "N/A"
             
         # 截断过长字段
         user_name = truncate_text(user_name, 20)
-        event_type = truncate_text(event_type, 25)
+        event_message = truncate_text(event_message, 25)
         target_name = truncate_text(target_name, 40)
         
-        print(header_format.format(timestamp, event_type, user_name, source_ip, target_name))
+        print(header_format.format(timestamp, event_message, user_name, source_ip, target_name))
     
     print_divider("-", 120)
 
@@ -994,9 +990,11 @@ def render_audit_events_telegram(events: List[Any], limit: int = 10) -> str:
     if not events:
         return "📭 <b>未找到审计事件</b>"
     
-    # 调试：记录第一个事件的字段
+    # 调试：记录第一个事件的完整内容
     if events and isinstance(events[0], dict):
-        LOGGER.info(f"审计事件字段: {list(events[0].keys())[:10]}")
+        import json
+        LOGGER.info(f"审计事件字段: {list(events[0].keys())}")
+        LOGGER.info(f"第一条事件完整数据: {json.dumps(events[0], ensure_ascii=False, indent=2)[:1000]}")
     
     parts = [
         f"<b>📋 审计事件 (最近 {min(len(events), limit)} 条)</b>\n",
@@ -1004,10 +1002,8 @@ def render_audit_events_telegram(events: List[Any], limit: int = 10) -> str:
     ]
     
     for i, event in enumerate(events[:limit], 1):
-        # 尝试多种可能的字段名（camelCase 和 lowercase）
-        timestamp = (safe_get_any(event, "timestamp") or 
-                     safe_get_any(event, "Timestamp") or 
-                     safe_get_any(event, "meta", {}).get("created", ""))
+        # 使用实际 API 返回的字段名
+        timestamp = safe_get_any(event, "timestamp", default="")
         if timestamp:
             try:
                 dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
@@ -1017,41 +1013,32 @@ def render_audit_events_telegram(events: List[Any], limit: int = 10) -> str:
         else:
             timestamp = "N/A"
         
-        event_type = (safe_get_any(event, "eventType") or 
-                      safe_get_any(event, "EventType") or 
-                      safe_get_any(event, "action") or "N/A")
+        # Identity Domains 使用 message 字段存储事件描述
+        event_message = safe_get_any(event, "message", default="N/A")
         
-        # 事件类型图标
+        # 事件类型图标（基于 message 字段内容）
         icon = "🔐"
-        if "login" in str(event_type).lower():
+        if "login" in str(event_message).lower() or "sign in" in str(event_message).lower():
             icon = "🔑"
-        elif "logout" in str(event_type).lower():
+        elif "logout" in str(event_message).lower() or "sign out" in str(event_message).lower():
             icon = "🚪"
-        elif "create" in str(event_type).lower():
+        elif "create" in str(event_message).lower():
             icon = "➕"
-        elif "update" in str(event_type).lower():
+        elif "update" in str(event_message).lower() or "modify" in str(event_message).lower():
             icon = "✏️"
-        elif "delete" in str(event_type).lower():
+        elif "delete" in str(event_message).lower() or "remove" in str(event_message).lower():
             icon = "🗑️"
-        elif "password" in str(event_type).lower():
+        elif "password" in str(event_message).lower():
             icon = "🔒"
         
-        # 获取用户信息
-        actor = safe_get_any(event, "actor") or safe_get_any(event, "Actor") or {}
-        if isinstance(actor, dict):
-            user_name = (actor.get("displayName") or 
-                        actor.get("display") or 
-                        actor.get("value") or 
-                        actor.get("ref", "").split("/")[-1] or "系统")
-        else:
-            user_name = str(actor) if actor else "系统"
+        # 获取用户信息（actorName 或 actorDisplayName）
+        user_name = (safe_get_any(event, "actorDisplayName") or 
+                    safe_get_any(event, "actorName") or "系统")
             
-        # 获取源 IP
-        source_ip = (safe_get_any(event, "sourceIp") or 
-                     safe_get_any(event, "SourceIp") or 
-                     safe_get_any(event, "initiator", {}).get("ipAddress") or "N/A")
+        # 获取源 IP（clientIp 字段）
+        source_ip = safe_get_any(event, "clientIp", default="N/A")
         
-        parts.append(f"\n{icon} <b>{html.escape(str(event_type))}</b>")
+        parts.append(f"\n{icon} <b>{html.escape(str(event_message)[:80])}</b>")
         parts.append(f"   👤 用户: <code>{html.escape(user_name)}</code>")
         parts.append(f"   🌐 IP: <code>{source_ip}</code>")
         parts.append(f"   🕒 时间: {timestamp}")
