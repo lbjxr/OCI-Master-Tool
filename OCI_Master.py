@@ -994,46 +994,64 @@ def render_audit_events_telegram(events: List[Any], limit: int = 10) -> str:
     if not events:
         return "📭 <b>未找到审计事件</b>"
     
+    # 调试：记录第一个事件的字段
+    if events and isinstance(events[0], dict):
+        LOGGER.info(f"审计事件字段: {list(events[0].keys())[:10]}")
+    
     parts = [
         f"<b>📋 审计事件 (最近 {min(len(events), limit)} 条)</b>\n",
         "━━━━━━━━━━━━━━━━━━━━━━"
     ]
     
     for i, event in enumerate(events[:limit], 1):
-        timestamp = safe_get_any(event, "timestamp", default="")
+        # 尝试多种可能的字段名（camelCase 和 lowercase）
+        timestamp = (safe_get_any(event, "timestamp") or 
+                     safe_get_any(event, "Timestamp") or 
+                     safe_get_any(event, "meta", {}).get("created", ""))
         if timestamp:
             try:
                 dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
                 timestamp = dt.strftime("%m-%d %H:%M:%S")
             except:
                 pass
+        else:
+            timestamp = "N/A"
         
-        event_type = safe_get_any(event, "eventType", default="N/A")
+        event_type = (safe_get_any(event, "eventType") or 
+                      safe_get_any(event, "EventType") or 
+                      safe_get_any(event, "action") or "N/A")
         
         # 事件类型图标
         icon = "🔐"
-        if "login" in event_type.lower():
+        if "login" in str(event_type).lower():
             icon = "🔑"
-        elif "logout" in event_type.lower():
+        elif "logout" in str(event_type).lower():
             icon = "🚪"
-        elif "create" in event_type.lower():
+        elif "create" in str(event_type).lower():
             icon = "➕"
-        elif "update" in event_type.lower():
+        elif "update" in str(event_type).lower():
             icon = "✏️"
-        elif "delete" in event_type.lower():
+        elif "delete" in str(event_type).lower():
             icon = "🗑️"
-        elif "password" in event_type.lower():
+        elif "password" in str(event_type).lower():
             icon = "🔒"
         
-        actor = safe_get_any(event, "actor", default={})
+        # 获取用户信息
+        actor = safe_get_any(event, "actor") or safe_get_any(event, "Actor") or {}
         if isinstance(actor, dict):
-            user_name = actor.get("displayName") or actor.get("value", "系统")
+            user_name = (actor.get("displayName") or 
+                        actor.get("display") or 
+                        actor.get("value") or 
+                        actor.get("ref", "").split("/")[-1] or "系统")
         else:
-            user_name = "系统"
+            user_name = str(actor) if actor else "系统"
             
-        source_ip = safe_get_any(event, "sourceIp", default="N/A")
+        # 获取源 IP
+        source_ip = (safe_get_any(event, "sourceIp") or 
+                     safe_get_any(event, "SourceIp") or 
+                     safe_get_any(event, "initiator", {}).get("ipAddress") or "N/A")
         
-        parts.append(f"\n{icon} <b>{html.escape(event_type)}</b>")
+        parts.append(f"\n{icon} <b>{html.escape(str(event_type))}</b>")
         parts.append(f"   👤 用户: <code>{html.escape(user_name)}</code>")
         parts.append(f"   🌐 IP: <code>{source_ip}</code>")
         parts.append(f"   🕒 时间: {timestamp}")
