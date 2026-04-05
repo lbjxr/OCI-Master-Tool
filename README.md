@@ -2,19 +2,22 @@
 
 OCI Master 是一个基于 Python 与 Oracle Cloud Infrastructure (OCI) SDK 的轻量级工具，帮助甲骨文云用户完成日常运维：账单查询导出、密码策略治理（支持“永不过期”策略）以及 Telegram 机器人查询等。
 
-## 📦 版本 v1.1.0（2026-04-05）
-- 🎨 移动端 UI：费用/用户/策略输出改为卡片式布局，更适合 Telegram/手机阅读
-- 🧭 费用视图：日期倒序、每日小计、服务明细（Top3 + 其他汇总）
+## 📦 版本 v1.2.0（2026-04-05）
+- 🆕 Identity Domains 审计事件查询：支持 CLI 和 Telegram Bot，可查询登录/登出/密码修改/权限变更等操作
+- 🔍 SCIM 2.0 过滤：支持过滤语法（例：`message co "login"`, `actorName eq "user@example.com"`）
+- 🎨 移动端 UI：费用/用户/策略/审计输出改为卡片式布局，更适合 Telegram/手机阅读
 - 🧩 服务识别：自动添加中文名称与表情图标（计算/存储/网络/数据库等）
 - 🔐 安全增强：授权白名单严格校验、Bot Token 环境变量优先、HTML 转义、配置必填校验
-- ⚙️ 健壮性：空数据友好提示、常量化魔法数字、超时优化（timeout=(5,60)）
+- ⚙️ 健墮性：空数据友好提示、常量化魔法数字、超时优化（timeout=(5,60)）
+- 🐛 Bug 修复：Telegram Bot HTML 转义错误、Python unbuffered 输出、REST API 字段映射
 
 ## ✨ 主要功能（Features）
 - 🛡️ 密码策略治理：一键克隆官方标准，创建优先级最高的“永不过期”策略（可回滚/对比）
 - 💰 费用导出：按日历月统计各服务扣费明细，UTF-8-SIG CSV（兼容 Excel）
+- 📊 审计事件查询：查看 Identity Domains 身份审计记录（登录/登出/密码修改/权限变更等）
 - 🤖 本地运行：基于 OCI 官方 SDK 直连，无需第三方托管密钥
 - 🧭 多平台支持：Windows / Linux / macOS
-- 💬 Telegram 机器人：随时查询费用、用户信息、密码策略（移动端友好展示）
+- 💬 Telegram 机器人：随时查询费用、用户信息、密码策略、审计事件（移动端友好展示）
 
 ---
 
@@ -64,9 +67,10 @@ python3 OCI_Master.py
   1. 👤 查看当前用户信息
   2. 💰 导出本月费用账单 (CSV)
   3. 🛡️ 查询当前密码策略看板
-  4. 🔒 创建/修复永不过期安全策略
-  5. 🗑️ 删除冗余密码策略
-  6. 🚪 退出程序
+  4. 📊 查询 Identity Domains 审计事件
+  5. 🔒 创建/修复永不过期安全策略
+  6. 🗑️ 删除冗余密码策略
+  7. 🚪 退出程序
 ```
 
 ### B. Telegram Bot 模式（移动端友好）
@@ -140,6 +144,7 @@ sudo systemctl --no-pager -l status oci-master-telegram.service
 - 👤 `/user_info` — 用户账号信息（基础/联系方式/权限/安全状态）
 - 💰 `/usage_fee` — 本月费用账单（按日汇总 + 服务明细）
 - 🛡️ `/policies` — 密码策略看板（按优先级、当前生效高亮）
+- 📊 `/audit_events [limit]` — Identity Domains 审计事件（默认 10 条，最多 50）
 - 🔒 `/create_safe_policy` — 创建永不过期策略
 - 🗑️ `/delete_policy <名称>` — 删除指定策略
 - 💬 `/help` — 分类帮助菜单
@@ -161,13 +166,69 @@ sudo systemctl --no-pager -l status oci-master-telegram.service
 
 ---
 
+### C. 审计事件查询（Identity Domains Audit）
+
+OCI Master 支持查询 Identity Domains 审计事件，追踪身份相关操作（登录/登出/密码修改/权限变更等）。
+
+#### CLI 命令
+```bash
+python3 OCI_Master.py audit-events --limit 20
+python3 OCI_Master.py audit-events --filter 'message co "login"' --limit 50
+```
+
+参数说明：
+- `--limit N`：返回条数（默认 10）
+- `--filter "SCIM"`：SCIM 2.0 过滤语法，例如 `message co "password"` / `actorName eq "user@example.com"`
+- `--sort-by field`：排序字段（默认 timestamp）
+- `--sort-order ORDER`：排序方式（ascending / descending）
+
+#### Telegram 命令
+```
+/audit_events        # 查询最近 10 条
+/audit_events 20     # 查询最近 20 条（最多 50）
+```
+
+示例输出：
+```
+📋 审计事件 (最近 10 条)
+━━━━━━━━━━━━━━━━━━━━━━
+
+🔑 User benjianl@outlook.com signed in
+   👤 用户: <code>benjianl@outlook.com</code>
+   🌐 IP: <code>123.45.67.89</code>
+   🕒 时间: 04-01 08:36:16
+
+🔒 Password policy updated
+   👤 用户: <code>本俭 刘</code>
+   🌐 IP: <code>98.76.54.32</code>
+   🕒 时间: 04-01 08:30:22
+```
+
+#### 技术细节
+- **API 调用**：Identity Domains REST API（`/admin/v1/AuditEvents`）
+- **SDK 限制**：Python OCI SDK 未封装此 API，使用 `oci.signer.Signer` 直接签名 HTTP 请求
+- **字段映射**：
+  - 用户名：`actorDisplayName` / `actorName`
+  - 源 IP：`clientIp`
+  - 事件描述：`message`
+  - 时间戳：`timestamp`
+
+---
+
 ## 📚 更新记录（Changelog）
 
-- 2026-04-05 · v1.1.0
-  - 移动端友好 UI：卡片式布局（费用/用户/策略）
+- 2026-04-05 · v1.2.0
+  - 新功能：Identity Domains 审计事件查询（CLI + Telegram）
+  - 支持 SCIM 2.0 过滤语法（`message co "login"`）
+  - 移动端友好 UI：卡片式布局（费用/用户/策略/审计）
   - 服务类型中文化与图标映射
   - 安全增强：授权白名单、环境变量 Token、HTML 转义、配置校验
   - 健壮性：空数据提示、常量化、超时优化
+  - Bug 修复：Telegram Bot HTML 转义、unbuffered 输出、REST API 字段映射
+
+- 2026-04-05 · v1.1.0
+  - 移动端友好 UI 优化
+  - 服务类型中文化
 
 - 2026-04-03 · v1.0.x
   - 增强用户/域信息展示
