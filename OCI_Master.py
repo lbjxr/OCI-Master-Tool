@@ -1158,9 +1158,15 @@ class TelegramBotRunner:
 
     def _request(self, method: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         response = self.session.post(f"{self.api_base}/{method}", json=payload or {}, timeout=(5, 60))
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            LOGGER.error(f"Telegram API HTTP 错误: {e}")
+            LOGGER.error(f"Response: {response.text[:500]}")
+            raise
         data = response.json()
         if not data.get("ok"):
+            LOGGER.error(f"Telegram API 返回错误: {data}")
             raise ValueError(f"Telegram API 调用失败: {data}")
         return data
 
