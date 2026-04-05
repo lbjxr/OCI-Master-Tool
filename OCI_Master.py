@@ -839,6 +839,173 @@ def list_policies(app_config: Optional[Dict[str, Any]] = None) -> None:
         print(f"❌ 查询失败: {e}")
 
 
+
+
+# ==========================================
+# 审计事件查询功能
+# ==========================================
+def list_audit_events(
+    app_config: Optional[Dict[str, Any]] = None,
+    limit: int = 20,
+    filter_expr: Optional[str] = None,
+    sort_by: str = "timestamp",
+    sort_order: str = "DESCENDING"
+) -> None:
+    """查询 OCI Identity Domain 审计事件。
+    
+    Args:
+        app_config: 应用配置
+        limit: 返回结果数量限制（默认 20）
+        filter_expr: SCIM 过滤表达式，例如: 'eventType eq "user.login"'
+        sort_by: 排序字段（默认 timestamp）
+        sort_order: 排序方向 ASCENDING 或 DESCENDING（默认 DESCENDING）
+    """
+    print("\n" + "=" * 80)
+    print("📋 正在获取审计事件...")
+    try:
+        app_config = app_config or load_app_config()
+        config = get_oci_config(app_config)
+        domain_name = app_config.get("oci", {}).get("identity_domain_name", "Default")
+        id_domains_client = get_identity_domains_client(config, domain_name=domain_name)
+        
+        # 调用审计事件 API
+        kwargs = {
+            "count": limit,
+            "sort_by": sort_by,
+            "sort_order": sort_order
+        }
+        if filter_expr:
+            kwargs["filter"] = filter_expr
+            
+        response = id_domains_client.list_audit_events(**kwargs)
+        resources = getattr(response.data, "resources", [])
+        
+        if not resources:
+            print("📭 未找到审计事件")
+            return
+            
+        _print_audit_events_table(resources)
+        
+    except Exception as e:
+        LOGGER.exception("查询审计事件失败")
+        print(f"❌ 查询失败: {e}")
+
+
+def _print_audit_events_table(events: List[Any]) -> None:
+    """打印审计事件表格（CLI 格式）。"""
+    if not events:
+        print("📭 (无审计事件)")
+        return
+        
+    print(f"\n📋 共找到 {len(events)} 条审计事件\n")
+    print_divider("-", 120)
+    
+    # 表头
+    header_format = "{:<20} {:<25} {:<20} {:<15} {:<40}"
+    print(header_format.format("时间", "事件类型", "用户", "来源IP", "目标资源"))
+    print_divider("-", 120)
+    
+    for event in events:
+        timestamp = safe_get_any(event, "timestamp", default="")
+        # 转换 ISO 8601 时间为可读格式
+        if timestamp:
+            try:
+                dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                timestamp = dt.strftime("%Y-%m-%d %H:%M:%S")
+            except:
+                pass
+                
+        event_type = safe_get_any(event, "eventType", default="N/A")
+        
+        # 获取用户信息
+        actor = safe_get_any(event, "actor", default={})
+        if isinstance(actor, dict):
+            user_name = actor.get("displayName") or actor.get("value", "N/A")
+        else:
+            user_name = str(actor) if actor else "N/A"
+            
+        # 获取来源 IP
+        source_ip = safe_get_any(event, "sourceIp", default="N/A")
+        
+        # 获取目标资源
+        target = safe_get_any(event, "target", default={})
+        if isinstance(target, dict):
+            target_name = target.get("displayName") or target.get("value", "N/A")
+        else:
+            target_name = str(target) if target else "N/A"
+            
+        # 截断过长字段
+        user_name = truncate_text(user_name, 20)
+        event_type = truncate_text(event_type, 25)
+        target_name = truncate_text(target_name, 40)
+        
+        print(header_format.format(timestamp, event_type, user_name, source_ip, target_name))
+    
+    print_divider("-", 120)
+
+
+def render_audit_events_telegram(events: List[Any], limit: int = 10) -> str:
+    """渲染审计事件为 Telegram 格式。
+    
+    Args:
+        events: 审计事件列表
+        limit: 显示数量限制
+    """
+    if not events:
+        return "📭 <b>未找到审计事件</b>"
+    
+    parts = [
+        f"<b>📋 审计事件 (最近 {min(len(events), limit)} 条)</b>\n",
+        "━━━━━━━━━━━━━━━━━━━━━━"
+    ]
+    
+    for i, event in enumerate(events[:limit], 1):
+        timestamp = safe_get_any(event, "timestamp", default="")
+        if timestamp:
+            try:
+                dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                timestamp = dt.strftime("%m-%d %H:%M:%S")
+            except:
+                pass
+        
+        event_type = safe_get_any(event, "eventType", default="N/A")
+        
+        # 事件类型图标
+        icon = "🔐"
+        if "login" in event_type.lower():
+            icon = "🔑"
+        elif "logout" in event_type.lower():
+            icon = "🚪"
+        elif "create" in event_type.lower():
+            icon = "➕"
+        elif "update" in event_type.lower():
+            icon = "✏️"
+        elif "delete" in event_type.lower():
+            icon = "🗑️"
+        elif "password" in event_type.lower():
+            icon = "🔒"
+        
+        actor = safe_get_any(event, "actor", default={})
+        if isinstance(actor, dict):
+            user_name = actor.get("displayName") or actor.get("value", "系统")
+        else:
+            user_name = "系统"
+            
+        source_ip = safe_get_any(event, "sourceIp", default="N/A")
+        
+        parts.append(f"\n{icon} <b>{html.escape(event_type)}</b>")
+        parts.append(f"   👤 用户: <code>{html.escape(user_name)}</code>")
+        parts.append(f"   🌐 IP: <code>{source_ip}</code>")
+        parts.append(f"   🕒 时间: {timestamp}")
+    
+    parts.append("\n━━━━━━━━━━━━━━━━━━━━━━")
+    
+    if len(events) > limit:
+        parts.append(f"\n<i>... 还有 {len(events) - limit} 条事件未显示</i>")
+    
+    return "\n".join(parts)
+
+
 def create_safe_policy(app_config: Optional[Dict[str, Any]] = None, auto_approve: bool = False) -> None:
     """功能 4：创建永不过期安全策略。"""
     print("\n" + "=" * 80)
@@ -1095,7 +1262,8 @@ class TelegramBotRunner:
             "<b>📊 查询命令</b>\n"
             "👤 /user_info - 查看用户账号信息\n"
             "💰 /usage_fee - 本月费用账单\n"
-            "🛡️ /policies - 密码策略看板\n\n"
+            "🛡️ /policies - 密码策略看板\n"
+            "📋 /audit_events - 审计事件日志\n\n"
             "<b>⚙️ 管理命令</b>\n"
             "🔒 /create_safe_policy - 创建永不过期策略\n"
             "🗑️ /delete_policy <名称> - 删除指定策略\n\n"
@@ -1149,6 +1317,29 @@ class TelegramBotRunner:
                 return render_policies_telegram(resources)
             except Exception as e:
                 return f"❌ 查询失败: {str(e)[:200]}"
+        if normalized.startswith("/audit_events"):
+            try:
+                app_config = self.app_config or load_app_config()
+                config = get_oci_config(app_config)
+                domain_name = app_config.get("oci", {}).get("identity_domain_name", "Default")
+                id_domains_client = get_identity_domains_client(config, domain_name=domain_name)
+                
+                # 解析参数：/audit_events [limit]
+                parts = normalized.split()
+                limit = 10  # 默认显示 10 条
+                if len(parts) > 1 and parts[1].isdigit():
+                    limit = min(int(parts[1]), 50)  # 最多 50 条
+                
+                response = id_domains_client.list_audit_events(
+                    count=limit,
+                    sort_by="timestamp",
+                    sort_order="DESCENDING"
+                )
+                resources = getattr(response.data, "resources", [])
+                return render_audit_events_telegram(resources, limit=limit)
+            except Exception as e:
+                LOGGER.exception("查询审计事件失败")
+                return f"❌ 查询失败: {str(e)[:200]}"
         if normalized.startswith("/create_safe_policy"):
             return capture_output(create_safe_policy, self.app_config, True)
         if normalized.startswith("/delete_policy"):
@@ -1171,6 +1362,15 @@ class TelegramBotRunner:
             return render_usage_fee_telegram(report_data, show_all=False)
         if action == "policies":
             return capture_output(list_policies, self.app_config)
+        if action == "audit_events" or action.startswith("audit_events:"):
+            limit = 10
+            if ":" in action:
+                try:
+                    limit = int(action.split(":")[1])
+                    limit = min(limit, 50)
+                except:
+                    pass
+            return capture_output(list_audit_events, self.app_config, limit)
         if action == "create_safe_policy":
             return capture_output(create_safe_policy, self.app_config, True)
         if action.startswith("delete_policy:"):
@@ -1279,9 +1479,10 @@ def print_cli_menu() -> None:
     print("  1. 👤 查看当前用户详细信息")
     print("  2. 💰 导出本月费用账单 (CSV)")
     print("  3. 🛡️  查询当前密码策略看板")
-    print("  4. 🔒 创建/修复永不过期安全策略")
-    print("  5. 🗑️  删除冗余密码策略")
-    print("  6. 🤖 启动 Telegram Bot 轮询")
+    print("  4. 📋 查询审计事件日志")
+    print("  5. 🔒 创建/修复永不过期安全策略")
+    print("  6. 🗑️  删除冗余密码策略")
+    print("  7. 🤖 启动 Telegram Bot 轮询")
     print("  0. 🚪 退出程序")
     print("=" * 62)
 
@@ -1291,11 +1492,11 @@ def main_menu(app_config: Dict[str, Any]) -> None:
 
     while True:
         print_cli_menu()
-        choice = input("👉 请选择要执行的功能 (0-6): ").strip()
+        choice = input("👉 请选择要执行的功能 (0-7): ").strip()
 
-        if choice not in ["0", "1", "2", "3", "4", "5", "6"]:
+        if choice not in ["0", "1", "2", "3", "4", "5", "6", "7"]:
             os.system(clear_cmd)
-            print("❌ 指令无效！请重新输入菜单前方的数字 (0 到 6 之间)。")
+            print("❌ 指令无效！请重新输入菜单前方的数字 (0 到 7 之间)。")
             continue
 
         if choice == "1":
@@ -1305,10 +1506,12 @@ def main_menu(app_config: Dict[str, Any]) -> None:
         elif choice == "3":
             list_policies(app_config)
         elif choice == "4":
-            create_safe_policy(app_config)
+            list_audit_events(app_config)
         elif choice == "5":
-            delete_policy(app_config)
+            create_safe_policy(app_config)
         elif choice == "6":
+            delete_policy(app_config)
+        elif choice == "7":
             TelegramBotRunner(app_config).run_polling()
         elif choice == "0":
             print("\n👋 感谢使用，已安全退出程序！\n")
@@ -1334,6 +1537,12 @@ def main() -> None:
     uf.add_argument("--csv-out", help="将结果另存为 CSV 路径（默认读取 output.usage_fee_csv_* 配置）")
 
     sub.add_parser("policies", help="查询当前密码策略看板")
+
+    ae = sub.add_parser("audit-events", help="查询审计事件日志")
+    ae.add_argument("--limit", type=int, default=20, help="返回结果数量（默认 20）")
+    ae.add_argument("--filter", help="SCIM 过滤表达式，例如: 'eventType eq \"user.login\"'")
+    ae.add_argument("--sort-by", default="timestamp", help="排序字段（默认 timestamp）")
+    ae.add_argument("--sort-order", choices=["ASCENDING", "DESCENDING"], default="DESCENDING", help="排序方向")
 
     csp = sub.add_parser("create-safe-policy", help="创建/修复永不过期安全策略")
     csp.add_argument("--auto-approve", action="store_true", help="无需交互确认")
@@ -1367,6 +1576,14 @@ def main() -> None:
         return
     if args.cmd == "policies":
         return list_policies(app_config)
+    if args.cmd == "audit-events":
+        return list_audit_events(
+            app_config,
+            limit=args.limit,
+            filter_expr=args.filter,
+            sort_by=args.sort_by,
+            sort_order=args.sort_order
+        )
     if args.cmd == "create-safe-policy":
         return create_safe_policy(app_config, auto_approve=args.auto_approve)
     if args.cmd == "delete-policy":
