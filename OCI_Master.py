@@ -844,6 +844,47 @@ def list_policies(app_config: Optional[Dict[str, Any]] = None) -> None:
 # ==========================================
 # 审计事件查询功能
 # ==========================================
+def _fetch_audit_events_rest(
+    config: Dict[str, Any],
+    domain_url: str,
+    limit: int = 20,
+    filter_expr: Optional[str] = None,
+    sort_by: str = "timestamp",
+    sort_order: str = "DESCENDING"
+) -> List[Dict[str, Any]]:
+    """通过 REST API 获取审计事件。
+    
+    Returns:
+        审计事件列表
+    """
+    from oci.signer import Signer
+    import requests
+    
+    signer = Signer(
+        tenancy=config["tenancy"],
+        user=config["user"],
+        fingerprint=config["fingerprint"],
+        private_key_file_location=config.get("key_file")
+    )
+    
+    params = {
+        "count": limit,
+        "sortBy": sort_by,
+        "sortOrder": sort_order
+    }
+    if filter_expr:
+        params["filter"] = filter_expr
+        
+    url = f"{domain_url}/admin/v1/AuditEvents"
+    headers = {"Content-Type": "application/json"}
+    
+    response = requests.get(url, auth=signer, headers=headers, params=params, timeout=(5, 60))
+    response.raise_for_status()
+    data = response.json()
+    
+    return data.get("Resources", [])
+
+
 def list_audit_events(
     app_config: Optional[Dict[str, Any]] = None,
     limit: int = 20,
@@ -866,19 +907,18 @@ def list_audit_events(
         app_config = app_config or load_app_config()
         config = get_oci_config(app_config)
         domain_name = app_config.get("oci", {}).get("identity_domain_name", "Default")
-        id_domains_client = get_identity_domains_client(config, domain_name=domain_name)
         
-        # 调用审计事件 API
-        kwargs = {
-            "count": limit,
-            "sort_by": sort_by,
-            "sort_order": sort_order
-        }
-        if filter_expr:
-            kwargs["filter"] = filter_expr
-            
-        response = id_domains_client.list_audit_events(**kwargs)
-        resources = getattr(response.data, "resources", [])
+        # 获取 Identity Domain URL
+        identity_client = oci.identity.IdentityClient(config)
+        response = identity_client.list_domains(config["tenancy"])
+        domains = response.data
+        target_domain = next((d for d in domains if d.display_name == domain_name), None)
+        if not target_domain:
+            raise ValueError(f"未找到名为 {domain_name} 的 Identity Domain")
+        domain_url = target_domain.url.replace(":443", "")
+        
+        # 调用 REST API
+        resources = _fetch_audit_events_rest(config, domain_url, limit, filter_expr, sort_by, sort_order)
         
         if not resources:
             print("📭 未找到审计事件")
@@ -1329,7 +1369,15 @@ class TelegramBotRunner:
                 app_config = self.app_config or load_app_config()
                 config = get_oci_config(app_config)
                 domain_name = app_config.get("oci", {}).get("identity_domain_name", "Default")
-                id_domains_client = get_identity_domains_client(config, domain_name=domain_name)
+                
+                # 获取 Identity Domain URL
+                identity_client = oci.identity.IdentityClient(config)
+                response = identity_client.list_domains(config["tenancy"])
+                domains = response.data
+                target_domain = next((d for d in domains if d.display_name == domain_name), None)
+                if not target_domain:
+                    return f"❌ 未找到名为 {domain_name} 的 Identity Domain"
+                domain_url = target_domain.url.replace(":443", "")
                 
                 # 解析参数：/audit_events [limit]
                 parts = normalized.split()
@@ -1337,12 +1385,8 @@ class TelegramBotRunner:
                 if len(parts) > 1 and parts[1].isdigit():
                     limit = min(int(parts[1]), 50)  # 最多 50 条
                 
-                response = id_domains_client.list_audit_events(
-                    count=limit,
-                    sort_by="timestamp",
-                    sort_order="DESCENDING"
-                )
-                resources = getattr(response.data, "resources", [])
+                # 调用 REST API
+                resources = _fetch_audit_events_rest(config, domain_url, limit)
                 return render_audit_events_telegram(resources, limit=limit)
             except Exception as e:
                 LOGGER.exception("查询审计事件失败")
