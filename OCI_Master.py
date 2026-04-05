@@ -656,14 +656,35 @@ def render_user_info_telegram(user_data: Dict[str, Any]) -> str:
     # 基础信息
     username = safe_get_any(user_data, 'user_name', 'userName')
     display_name = safe_get_any(user_data, 'display_name', 'displayName')
+    description = safe_get(user_data, 'description')
+    user_id = safe_get(user_data, 'id')
+    user_ocid = safe_get(user_data, 'ocid', safe_get(user_data, 'id'))
     active = safe_get(user_data, 'active')
+    user_type = safe_get_any(user_data, 'user_type', 'userType')
+    locale = safe_get(user_data, 'locale')
+    timezone = safe_get(user_data, 'timezone')
     
     parts.extend([
         f"🔑 <b>用户名</b>: <code>{html.escape(str(username))}</code>",
         f"📛 <b>显示名</b>: {html.escape(str(display_name))}",
-        f"✅ <b>状态</b>: {'激活' if active else '停用'}",
-        "",
     ])
+    
+    if str(description) != "N/A":
+        parts.append(f"📝 <b>描述/全名</b>: {html.escape(str(description))}")
+    
+    parts.extend([
+        f"🆔 <b>用户 ID</b>: <code>{html.escape(str(user_id)[:20])}...</code>",
+        f"✅ <b>状态</b>: {'激活' if active else '停用'}",
+    ])
+    
+    if str(user_type) != "N/A":
+        parts.append(f"📄 <b>用户类型</b>: {html.escape(str(user_type))}")
+    if str(locale) != "N/A":
+        parts.append(f"🌐 <b>Locale</b>: {html.escape(str(locale))}")
+    if str(timezone) != "N/A":
+        parts.append(f"⏰ <b>时区</b>: {html.escape(str(timezone))}")
+    
+    parts.append("")
     
     # 联系方式
     emails = safe_get(user_data, "emails", [])
@@ -701,6 +722,19 @@ def render_user_info_telegram(user_data: Dict[str, Any]) -> str:
         
         parts.append("")
     
+    # 电话信息
+    phones = safe_get_any(user_data, "phone_numbers", "phoneNumbers", default=[])
+    if phones and phones != "N/A" and len(phones) > 0:
+        parts.append("<b>📱 电话</b>")
+        for phone in phones[:3]:
+            phone_val = safe_get(phone, 'value')
+            phone_type = safe_get(phone, 'type', '')
+            is_primary = safe_get(phone, 'primary', False)
+            primary_tag = " ⭐" if is_primary else ""
+            type_tag = f" ({phone_type})" if str(phone_type) != "N/A" else ""
+            parts.append(f"  • <code>{html.escape(str(phone_val))}</code>{type_tag}{primary_tag}")
+        parts.append("")
+    
     # 安全状态
     user_state = safe_get_any(
         user_data,
@@ -715,18 +749,40 @@ def render_user_info_telegram(user_data: Dict[str, Any]) -> str:
         default=None,
     )
     
-    if user_state and user_state != "N/A":
+    if (user_state and user_state != "N/A") or (password_state and password_state != "N/A"):
         parts.append("<b>🔒 账号安全</b>")
+    
+    if user_state and user_state != "N/A":
         locked = unwrap_state_value(safe_get(user_state, "locked", None), "on", default="N/A")
         if str(locked) != "N/A":
             lock_status = "🔒 已锁定" if locked else "✅ 未锁定"
-            parts.append(f"状态: {lock_status}")
+            parts.append(f"账号状态: {lock_status}")
+        
+        # 登录失败次数
+        failed_attempts = safe_get_any(user_state, 'failed_login_attempts', 'failedLoginAttempts')
+        if str(failed_attempts) != "N/A":
+            parts.append(f"登录失败: {failed_attempts} 次")
+        
+        # 最近成功登录
+        last_success = safe_get_any(user_state, 'last_successful_login_date', 'lastSuccessfulLoginDate')
+        if str(last_success) != "N/A":
+            parts.append(f"最近成功登录: {str(last_success)[:10]}")
     
     if password_state and password_state != "N/A":
         expired = unwrap_state_value(safe_get(password_state, "expired", None), "on", default="N/A")
         if str(expired) != "N/A":
             pwd_status = "⚠️ 已过期" if expired else "✅ 有效"
-            parts.append(f"密码: {pwd_status}")
+            parts.append(f"密码状态: {pwd_status}")
+        
+        # 密码过期时间
+        expiry_date = safe_get_any(password_state, 'expiry_date', 'expiryDate')
+        if str(expiry_date) != "N/A":
+            parts.append(f"密码过期: {str(expiry_date)[:10]}")
+        
+        # 上次修改密码
+        last_set = safe_get_any(password_state, 'last_successful_set_date', 'lastSuccessfulSetDate')
+        if str(last_set) != "N/A":
+            parts.append(f"上次修改: {str(last_set)[:10]}")
     
     return "\n".join(parts)
 
@@ -1191,7 +1247,9 @@ class TelegramBotRunner:
         except Exception as exc:
             result = f"❌ 命令执行失败：{exc}"
 
-        self.send_message(chat_id, result or "✅ 命令执行完成，但无返回内容。")
+        # 检测是否包含 HTML 标签
+        parse_mode = "HTML" if "<b>" in result or "<code>" in result or "<i>" in result else None
+        self.send_message(chat_id, result or "✅ 命令执行完成，但无返回内容。", parse_mode=parse_mode)
 
     def run_polling(self) -> None:
         self.validate()
