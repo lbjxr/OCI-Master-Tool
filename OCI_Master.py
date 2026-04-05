@@ -598,38 +598,42 @@ def render_usage_fee_telegram(report_data: Dict[str, Any], show_all: bool = Fals
         message_parts.append(f"\n<b>📆 {date_str}</b>")
         message_parts.append(f"💵 小计: <code>{total:.4f} {html.escape(currency)}</code>")
         
-        # 服务类型对应的 emoji 图标
-        def get_service_icon(service_name: str) -> str:
+        # 服务类型对应的 emoji 图标和中文名称
+        def get_service_display(service_name: str) -> tuple:
             service_lower = service_name.lower()
             if 'compute' in service_lower or 'instance' in service_lower:
-                return '🖥️'
-            elif 'storage' in service_lower or 'block' in service_lower or 'object' in service_lower:
-                return '💾'
-            elif 'network' in service_lower or 'bandwidth' in service_lower or 'load balancer' in service_lower:
-                return '🌐'
+                return ('🖥️', '计算实例')
+            elif 'storage' in service_lower or 'block' in service_lower:
+                return ('💾', '块存储')
+            elif 'object' in service_lower:
+                return ('💾', '对象存储')
+            elif 'network' in service_lower or 'bandwidth' in service_lower:
+                return ('🌐', '网络带宽')
+            elif 'load balancer' in service_lower:
+                return ('🌐', '负载均衡')
             elif 'database' in service_lower or 'mysql' in service_lower or 'oracle' in service_lower:
-                return '🗄️'
+                return ('🗄️', '数据库')
             elif 'function' in service_lower or 'serverless' in service_lower:
-                return '⚡'
+                return ('⚡', '无服务器')
             elif 'monitoring' in service_lower or 'observability' in service_lower:
-                return '📊'
+                return ('📊', '监控服务')
             elif 'security' in service_lower or 'firewall' in service_lower or 'waf' in service_lower:
-                return '🔒'
+                return ('🔒', '安全服务')
             elif 'ai' in service_lower or 'ml' in service_lower or 'machine learning' in service_lower:
-                return '🤖'
+                return ('🤖', 'AI/机器学习')
             elif 'container' in service_lower or 'kubernetes' in service_lower:
-                return '📦'
+                return ('📦', '容器服务')
             elif 'api' in service_lower or 'gateway' in service_lower:
-                return '🔌'
+                return ('🔌', 'API 网关')
             else:
-                return '🔹'
+                # 其他服务使用缩略后的原始名称
+                return ('🔹', truncate_text(service_name, 12))
         
         # 服务明细（仅显示前3个主要服务，其余合并）
         services_sorted = sorted(services, key=lambda x: x[1], reverse=True)
         for i, (service, amount) in enumerate(services_sorted[:3]):
-            service_short = truncate_text(service, 18)
-            icon = get_service_icon(service)
-            message_parts.append(f"  {icon} {html.escape(service_short)}: <code>{amount:.4f}</code>")
+            icon, display_name = get_service_display(service)
+            message_parts.append(f"  {icon} {html.escape(display_name)}: <code>{amount:.4f}</code>")
         
         if len(services_sorted) > 3:
             other_count = len(services_sorted) - 3
