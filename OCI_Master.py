@@ -1421,6 +1421,7 @@ class TelegramBotRunner:
         self.last_update_id = max(self.last_update_id, int(update.get("update_id", 0)))
         callback_query = update.get("callback_query")
         if callback_query:
+            LOGGER.info(f"🔘 处理 callback_query: {callback_query.get('data')}")
             self.handle_callback_query(callback_query)
             return
 
@@ -1430,43 +1431,71 @@ class TelegramBotRunner:
         text = message.get("text", "")
 
         if not chat_id or not text:
+            LOGGER.debug(f"⏩ 跳过空消息: chat_id={chat_id}, text={text}")
             return
 
+        LOGGER.info(f"💬 收到消息: chat_id={chat_id}, text={text[:50]}")
+
         if not self.is_authorized(message):
+            LOGGER.warning(f"❌ 未授权访问: chat_id={chat_id}")
             self.send_message(chat_id, "❌ 当前 chat/user 未授权执行该 Bot 命令。")
             return
 
         try:
+            LOGGER.info(f"🚀 开始处理命令: {text[:100]}")
             if text.strip().startswith("/usage_fee"):
+                LOGGER.info("📊 处理 /usage_fee 命令")
                 report_data = get_usage_fee_report_data(self.app_config)
                 rendered = render_usage_fee_telegram(report_data, show_all=False)
                 keyboard = self.build_usage_fee_keyboard(False, len(report_data["unique_dates"]), report_data["display_days"])
                 self.send_message(chat_id, rendered, parse_mode="HTML", reply_markup=keyboard)
+                LOGGER.info("✅ /usage_fee 命令处理完成")
                 return
 
             result = self.handle_command(text)
+            LOGGER.info(f"✅ 命令处理完成，结果长度: {len(result)} 字符")
         except Exception as exc:
+            LOGGER.exception(f"❌ 命令执行失败: {text[:50]}")
             result = f"❌ 命令执行失败：{exc}"
 
         # 检测是否包含 HTML 标签
         parse_mode = "HTML" if "<b>" in result or "<code>" in result or "<i>" in result else None
+        LOGGER.info(f"📤 发送回复: chat_id={chat_id}, parse_mode={parse_mode}, length={len(result)}")
         self.send_message(chat_id, result or "✅ 命令执行完成，但无返回内容。", parse_mode=parse_mode)
+        LOGGER.info("✅ 回复已发送")
 
     def run_polling(self) -> None:
-        self.validate()
-        self.refresh_bot_commands()
-        print("🤖 Telegram Bot 命令菜单已同步到 Telegram 客户端。")
-        print("🤖 Telegram Bot 已启动，正在轮询消息...")
-        print("按 Ctrl+C 可停止 Bot。")
+        LOGGER.info("🔍 开始启动 Telegram Bot...")
+        try:
+            LOGGER.info("🔍 步骤 1/3: 验证配置...")
+            self.validate()
+            LOGGER.info("✅ 配置验证通过")
+            
+            LOGGER.info("🔍 步骤 2/3: 同步 Bot 命令菜单...")
+            self.refresh_bot_commands()
+            LOGGER.info("✅ Telegram Bot 命令菜单已同步")
+            
+            LOGGER.info("🔍 步骤 3/3: 启动消息轮询...")
+            LOGGER.info("🤖 Telegram Bot 已启动，正在轮询消息...")
+            print("🤖 Telegram Bot 已启动，正在轮询消息...")  # 保留 print 以防 LOGGER 被禁用
+            print("按 Ctrl+C 可停止 Bot。")
+        except Exception as e:
+            LOGGER.exception("❌ Bot 启动失败")
+            raise
+        
         while True:
             try:
                 updates = self.get_updates()
+                if updates:
+                    LOGGER.info(f"📨 收到 {len(updates)} 条更新")
                 for update in updates:
                     self.process_update(update)
             except requests.RequestException as exc:
+                LOGGER.warning(f"⚠️ Telegram 网络请求失败: {exc}")
                 print(f"⚠️ Telegram 网络请求失败: {exc}")
                 time.sleep(self.poll_interval)
             except Exception as exc:
+                LOGGER.exception("⚠️ Telegram 处理异常")
                 print(f"⚠️ Telegram 处理异常: {exc}")
                 time.sleep(self.poll_interval)
 
