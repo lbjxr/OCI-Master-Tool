@@ -564,31 +564,54 @@ def render_usage_fee_telegram(report_data: Dict[str, Any], show_all: bool = Fals
         ])
 
     latest_dates = set(unique_dates if show_all else unique_dates[-display_days:]) if unique_dates else set()
-    display_rows = [
-        [row[0], truncate_text(row[1], 22), row[2], row[3] or "-"]
-        for row in rows
-        if row[0] in latest_dates
-    ]
-
-    table = build_text_table(["日期", "服务", "金额", "币种"], display_rows)
+    
+    # 按日期分组汇总
+    from collections import defaultdict
+    daily_totals = defaultdict(float)
+    daily_services = defaultdict(list)
+    
+    for row in rows:
+        date_str, service, amount_str, currency = row
+        if date_str in latest_dates:
+            amount = float(amount_str)
+            daily_totals[date_str] += amount
+            daily_services[date_str].append((service, amount))
+    
     hidden_days = max(0, len(unique_dates) - display_days)
-
+    currency = report_data['currency']
+    
+    # 构建移动端友好的卡片式布局
     message_parts = [
         "<b>💰 本月费用汇总</b>",
         f"查询区间: <code>{report_data['start_time'].strftime('%Y-%m-%d')} ~ {report_data['end_time'].strftime('%Y-%m-%d')}</code>",
-        f"账单总记录数: <b>{len(rows)}</b>",
-        f"涉及日期数: <b>{len(unique_dates)}</b>",
-        f"本月预估总计: <b>{report_data['total_cost']:.4f} {html.escape(report_data['currency'])}</b>",
+        f"本月预估总计: <b>{report_data['total_cost']:.4f} {html.escape(currency)}</b>",
         "",
-        f"<b>📄 费用明细（{'全部数据' if show_all else f'最近 {display_days} 天'}）</b>",
-        f"<pre>{html.escape(table)}</pre>",
+        f"<b>📅 {'全部数据' if show_all else f'最近 {display_days} 天'} ({len(daily_totals)} 天)</b>",
     ]
-
+    
+    # 按日期倒序显示（最新的在前）
+    for date_str in sorted(daily_totals.keys(), reverse=True):
+        total = daily_totals[date_str]
+        services = daily_services[date_str]
+        
+        # 日期标题行
+        message_parts.append(f"\n<b>📆 {date_str}</b>")
+        message_parts.append(f"💵 小计: <code>{total:.4f} {html.escape(currency)}</code>")
+        
+        # 服务明细（仅显示前3个主要服务，其余合并）
+        services_sorted = sorted(services, key=lambda x: x[1], reverse=True)
+        for i, (service, amount) in enumerate(services_sorted[:3]):
+            service_short = truncate_text(service, 20)
+            message_parts.append(f"  • {html.escape(service_short)}: <code>{amount:.4f}</code>")
+        
+        if len(services_sorted) > 3:
+            other_count = len(services_sorted) - 3
+            other_total = sum(s[1] for s in services_sorted[3:])
+            message_parts.append(f"  • 其他 {other_count} 项: <code>{other_total:.4f}</code>")
+    
     if not show_all and hidden_days > 0:
-        message_parts.append(f"ℹ️ 已折叠更早的 <b>{hidden_days}</b> 天数据，点击下方按钮可展开全部。")
-    elif show_all and len(unique_dates) > display_days:
-        message_parts.append("ℹ️ 当前显示全部数据，点击下方按钮可切回默认折叠视图。")
-
+        message_parts.append(f"\nℹ️ 已折叠更早的 <b>{hidden_days}</b> 天数据")
+    
     return "\n".join(message_parts)
 
 
