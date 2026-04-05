@@ -1231,6 +1231,7 @@ class TelegramBotRunner:
             {"command": "user_info", "description": "查看当前用户详细信息"},
             {"command": "usage_fee", "description": "查询本月费用账单"},
             {"command": "policies", "description": "查询密码策略看板"},
+            {"command": "audit_events", "description": "查询审计事件日志"},
             {"command": "create_safe_policy", "description": "创建永不过期安全策略"},
             {"command": "delete_policy", "description": "删除指定密码策略"},
         ]
