@@ -193,13 +193,13 @@ python3 OCI_Master.py audit-events --filter 'message co "login"' --limit 50
 📋 审计事件 (最近 10 条)
 ━━━━━━━━━━━━━━━━━━━━━━
 
-🔑 User benjianl@outlook.com signed in
-   👤 用户: <code>benjianl@outlook.com</code>
+🔑 User b.com signed in
+   👤 用户: <code>b@com</code>
    🌐 IP: <code>123.45.67.89</code>
    🕒 时间: 04-01 08:36:16
 
 🔒 Password policy updated
-   👤 用户: <code>本俭 刘</code>
+   👤 用户: <code>11用户名</code>
    🌐 IP: <code>98.76.54.32</code>
    🕒 时间: 04-01 08:30:22
 ```
