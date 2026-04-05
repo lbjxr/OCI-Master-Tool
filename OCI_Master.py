@@ -646,6 +646,129 @@ def render_usage_fee_telegram(report_data: Dict[str, Any], show_all: bool = Fals
     return "\n".join(message_parts)
 
 
+def render_user_info_telegram(user_data: Dict[str, Any]) -> str:
+    """为 Telegram 渲染用户信息（移动端友好）。"""
+    parts = [
+        "<b>👤 用户账号信息</b>",
+        "",
+    ]
+    
+    # 基础信息
+    username = safe_get_any(user_data, 'user_name', 'userName')
+    display_name = safe_get_any(user_data, 'display_name', 'displayName')
+    active = safe_get(user_data, 'active')
+    
+    parts.extend([
+        f"🔑 <b>用户名</b>: <code>{html.escape(str(username))}</code>",
+        f"📛 <b>显示名</b>: {html.escape(str(display_name))}",
+        f"✅ <b>状态</b>: {'激活' if active else '停用'}",
+        "",
+    ])
+    
+    # 联系方式
+    emails = safe_get(user_data, "emails", [])
+    if emails and emails != "N/A":
+        parts.append("<b>📧 邮箱</b>")
+        for email in emails[:3]:
+            email_val = safe_get(email, 'value')
+            is_primary = safe_get(email, 'primary', False)
+            primary_tag = " ⭐" if is_primary else ""
+            parts.append(f"  • <code>{html.escape(str(email_val))}</code>{primary_tag}")
+        parts.append("")
+    
+    # 权限信息
+    groups = safe_get(user_data, "groups", [])
+    roles = safe_get(user_data, "roles", [])
+    
+    if (groups and groups != "N/A") or (roles and roles != "N/A"):
+        parts.append("<b>🛡️ 权限信息</b>")
+        
+        if groups and groups != "N/A":
+            parts.append(f"👪 所属组: <b>{len(groups)}</b> 个")
+            for i, group in enumerate(groups[:3], 1):
+                group_name = safe_get(group, 'display', safe_get(group, 'value'))
+                parts.append(f"  {i}. {html.escape(str(group_name))}")
+            if len(groups) > 3:
+                parts.append(f"  … 还有 {len(groups) - 3} 个组")
+        
+        if roles and roles != "N/A":
+            parts.append(f"🛡️ 角色: <b>{len(roles)}</b> 个")
+            for i, role in enumerate(roles[:3], 1):
+                role_name = safe_get(role, 'display', safe_get(role, 'value'))
+                parts.append(f"  {i}. {html.escape(str(role_name))}")
+            if len(roles) > 3:
+                parts.append(f"  … 还有 {len(roles) - 3} 个角色")
+        
+        parts.append("")
+    
+    # 安全状态
+    user_state = safe_get_any(
+        user_data,
+        "urn_ietf_params_scim_schemas_oracle_idcs_extension_user_state_user",
+        "urn:ietf:params:scim:schemas:oracle:idcs:extension:userState:User",
+        default=None,
+    )
+    password_state = safe_get_any(
+        user_data,
+        "urn_ietf_params_scim_schemas_oracle_idcs_extension_password_state_user",
+        "urn:ietf:params:scim:schemas:oracle:idcs:extension:passwordState:User",
+        default=None,
+    )
+    
+    if user_state and user_state != "N/A":
+        parts.append("<b>🔒 账号安全</b>")
+        locked = unwrap_state_value(safe_get(user_state, "locked", None), "on", default="N/A")
+        if str(locked) != "N/A":
+            lock_status = "🔒 已锁定" if locked else "✅ 未锁定"
+            parts.append(f"状态: {lock_status}")
+    
+    if password_state and password_state != "N/A":
+        expired = unwrap_state_value(safe_get(password_state, "expired", None), "on", default="N/A")
+        if str(expired) != "N/A":
+            pwd_status = "⚠️ 已过期" if expired else "✅ 有效"
+            parts.append(f"密码: {pwd_status}")
+    
+    return "\n".join(parts)
+
+
+def render_policies_telegram(policies_data: list) -> str:
+    """为 Telegram 渲染密码策略看板（移动端友好）。"""
+    if not policies_data:
+        return "<b>🛡️ 密码策略看板</b>\n\n❓ 未发现任何策略"
+    
+    sorted_policies = sorted(
+        policies_data,
+        key=lambda x: getattr(x, "priority", 999) if getattr(x, "priority", None) is not None else 999,
+    )
+    
+    parts = [
+        "<b>🛡️ 密码策略看板</b>",
+        f"策略总数: <b>{len(policies_data)}</b>",
+        "",
+    ]
+    
+    for i, policy in enumerate(sorted_policies, 1):
+        name = str(getattr(policy, "name", "N/A") or "N/A")
+        priority = getattr(policy, "priority", "N/A")
+        expires = getattr(policy, "password_expires_after", "N/A")
+        
+        is_active = (i == 1)  # 优先级最高的正在生效
+        status_icon = "🚀" if is_active else "⏳"
+        
+        if str(expires) == "0":
+            expire_text = "♾️ 永不过期"
+        else:
+            expire_text = f"📅 {expires} 天"
+        
+        parts.append(f"<b>{status_icon} {i}. {html.escape(name)}</b>")
+        parts.append(f"   优先级: <code>{priority}</code> | 过期: {expire_text}")
+        if is_active:
+            parts.append("   🟢 <i>当前生效</i>")
+        parts.append("")
+    
+    return "\n".join(parts)
+
+
 def list_policies(app_config: Optional[Dict[str, Any]] = None) -> None:
     """功能 3：查询当前密码策略状态。"""
     print("\n" + "=" * 80)
@@ -912,23 +1035,17 @@ class TelegramBotRunner:
 
     def build_help_text(self) -> str:
         return (
-            "🤖 OCI Master Telegram Bot 命令菜单\n"
-            "────────────────────────\n"
-            "/start                查看欢迎信息\n"
-            "/help                 查看帮助\n"
-            "/menu                 查看帮助\n"
-            "/user_info            查看当前用户详细信息\n"
-            "/usage_fee            导出本月费用账单\n"
-            "/policies             查询密码策略看板\n"
-            "/create_safe_policy   创建永不过期安全策略\n"
-            "/delete_policy 名称   删除指定策略\n"
-            "/run <action>         执行动作\n\n"
-            "可用 action:\n"
-            "- user_info\n"
-            "- usage_fee\n"
-            "- policies\n"
-            "- create_safe_policy\n"
-            "- delete_policy:<名称>"
+            "<b>🤖 OCI Master Bot 命令菜单</b>\n\n"
+            "<b>📊 查询命令</b>\n"
+            "👤 /user_info - 查看用户账号信息\n"
+            "💰 /usage_fee - 本月费用账单\n"
+            "🛡️ /policies - 密码策略看板\n\n"
+            "<b>⚙️ 管理命令</b>\n"
+            "🔒 /create_safe_policy - 创建永不过期策略\n"
+            "🗑️ /delete_policy <名称> - 删除指定策略\n\n"
+            "<b>❓ 帮助</b>\n"
+            "👋 /start - 欢迎信息\n"
+            "💬 /help - 显示此帮助"
         )
 
     def build_usage_fee_keyboard(self, show_all: bool, unique_dates_count: int, display_days: int) -> Optional[Dict[str, Any]]:
@@ -948,12 +1065,34 @@ class TelegramBotRunner:
         if normalized.startswith("/help") or normalized.startswith("/menu"):
             return self.build_help_text()
         if normalized.startswith("/user_info"):
-            return capture_output(get_user_info, self.app_config)
+            try:
+                app_config = self.app_config or load_app_config()
+                config = get_oci_config(app_config)
+                identity_client = oci.identity.IdentityClient(config)
+                basic_response = identity_client.get_user(config["user"])
+                if not basic_response or not getattr(basic_response, "data", None):
+                    return "❌ 未能获取用户信息"
+                current_user_ocid = safe_get(basic_response.data, "id")
+                domain_name = app_config.get("oci", {}).get("identity_domain_name", "Default")
+                id_domains_client = get_identity_domains_client(config, domain_name=domain_name)
+                domain_user = find_current_user_in_domain(id_domains_client, current_user_ocid)
+                return render_user_info_telegram(domain_user)
+            except Exception as e:
+                return f"❌ 查询失败: {str(e)[:200]}"
         if normalized.startswith("/usage_fee"):
             report_data = get_usage_fee_report_data(self.app_config)
             return render_usage_fee_telegram(report_data, show_all=False)
         if normalized.startswith("/policies"):
-            return capture_output(list_policies, self.app_config)
+            try:
+                app_config = self.app_config or load_app_config()
+                config = get_oci_config(app_config)
+                domain_name = app_config.get("oci", {}).get("identity_domain_name", "Default")
+                id_domains_client = get_identity_domains_client(config, domain_name=domain_name)
+                response = id_domains_client.list_password_policies()
+                resources = getattr(response.data, "resources", [])
+                return render_policies_telegram(resources)
+            except Exception as e:
+                return f"❌ 查询失败: {str(e)[:200]}"
         if normalized.startswith("/create_safe_policy"):
             return capture_output(create_safe_policy, self.app_config, True)
         if normalized.startswith("/delete_policy"):
