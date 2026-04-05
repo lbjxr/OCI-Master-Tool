@@ -1273,7 +1273,7 @@ class TelegramBotRunner:
             "📋 /audit_events - 审计事件日志\n\n"
             "<b>⚙️ 管理命令</b>\n"
             "🔒 /create_safe_policy - 创建永不过期策略\n"
-            "🗑️ /delete_policy <名称> - 删除指定策略\n\n"
+            "🗑️ /delete_policy &lt;名称&gt; - 删除指定策略\n\n"
             "<b>❓ 帮助</b>\n"
             "👋 /start - 欢迎信息\n"
             "💬 /help - 显示此帮助"
