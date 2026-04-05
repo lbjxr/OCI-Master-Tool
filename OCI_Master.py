@@ -598,16 +598,43 @@ def render_usage_fee_telegram(report_data: Dict[str, Any], show_all: bool = Fals
         message_parts.append(f"\n<b>📆 {date_str}</b>")
         message_parts.append(f"💵 小计: <code>{total:.4f} {html.escape(currency)}</code>")
         
+        # 服务类型对应的 emoji 图标
+        def get_service_icon(service_name: str) -> str:
+            service_lower = service_name.lower()
+            if 'compute' in service_lower or 'instance' in service_lower:
+                return '🖥️'
+            elif 'storage' in service_lower or 'block' in service_lower or 'object' in service_lower:
+                return '💾'
+            elif 'network' in service_lower or 'bandwidth' in service_lower or 'load balancer' in service_lower:
+                return '🌐'
+            elif 'database' in service_lower or 'mysql' in service_lower or 'oracle' in service_lower:
+                return '🗄️'
+            elif 'function' in service_lower or 'serverless' in service_lower:
+                return '⚡'
+            elif 'monitoring' in service_lower or 'observability' in service_lower:
+                return '📊'
+            elif 'security' in service_lower or 'firewall' in service_lower or 'waf' in service_lower:
+                return '🔒'
+            elif 'ai' in service_lower or 'ml' in service_lower or 'machine learning' in service_lower:
+                return '🤖'
+            elif 'container' in service_lower or 'kubernetes' in service_lower:
+                return '📦'
+            elif 'api' in service_lower or 'gateway' in service_lower:
+                return '🔌'
+            else:
+                return '🔹'
+        
         # 服务明细（仅显示前3个主要服务，其余合并）
         services_sorted = sorted(services, key=lambda x: x[1], reverse=True)
         for i, (service, amount) in enumerate(services_sorted[:3]):
-            service_short = truncate_text(service, 20)
-            message_parts.append(f"  • {html.escape(service_short)}: <code>{amount:.4f}</code>")
+            service_short = truncate_text(service, 18)
+            icon = get_service_icon(service)
+            message_parts.append(f"  {icon} {html.escape(service_short)}: <code>{amount:.4f}</code>")
         
         if len(services_sorted) > 3:
             other_count = len(services_sorted) - 3
             other_total = sum(s[1] for s in services_sorted[3:])
-            message_parts.append(f"  • 其他 {other_count} 项: <code>{other_total:.4f}</code>")
+            message_parts.append(f"  📦 其他 {other_count} 项: <code>{other_total:.4f}</code>")
     
     if not show_all and hidden_days > 0:
         message_parts.append(f"\nℹ️ 已折叠更早的 <b>{hidden_days}</b> 天数据")
