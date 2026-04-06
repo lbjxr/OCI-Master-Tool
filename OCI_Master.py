@@ -2205,10 +2205,10 @@ class TelegramBotRunner:
 
     def build_sl_root_keyboard(self) -> Dict[str, Any]:
         return build_inline_keyboard([
-            [{"text": "📋 查看安全列表", "callback_data": "slm:start:view"}],
-            [{"text": "➕ 新增入站", "callback_data": "slm:start:add_ingress"}, {"text": "➕ 新增出站", "callback_data": "slm:start:add_egress"}],
-            [{"text": "➖ 删除入站", "callback_data": "slm:start:delete_ingress"}, {"text": "➖ 删除出站", "callback_data": "slm:start:delete_egress"}],
-            [{"text": "✏️ 替换入站", "callback_data": "slm:start:replace_ingress"}, {"text": "✏️ 替换出站", "callback_data": "slm:start:replace_egress"}],
+            [{"text": "📝 查看安全列表", "callback_data": "slm:start:view"}],
+            [{"text": "📥 新增入站", "callback_data": "slm:start:add_ingress"}, {"text": "📤 新增出站", "callback_data": "slm:start:add_egress"}],
+            [{"text": "🚫 删除入站", "callback_data": "slm:start:delete_ingress"}, {"text": "⛔ 删除出站", "callback_data": "slm:start:delete_egress"}],
+            [{"text": "🔄 替换入站", "callback_data": "slm:start:replace_ingress"}, {"text": "↪️ 替换出站", "callback_data": "slm:start:replace_egress"}],
         ])
 
     def _sl_action_label(self, action: Optional[str]) -> str:
@@ -2393,7 +2393,13 @@ class TelegramBotRunner:
             sl_token = self._register_sl_token(state, "s", sl_id)
             lines.append(f"• <b>{html.escape(display_name)}</b>")
             lines.append(f"  <code>{html.escape(sl_id)}</code>")
-            rows.append([{"text": f"{display_name[:24]}", "callback_data": f"slm:pick:{action or 'view'}:{instance_token}:{sl_token}"}])
+            # 按钮文本：如果名称包含 Default，翻译为中文
+            button_text = display_name
+            if "Default" in display_name:
+                button_text = display_name.replace("Default Security List for", "默认安全列表")
+            if len(button_text) > 24:
+                button_text = button_text[:21] + "..."
+            rows.append([{"text": button_text, "callback_data": f"slm:pick:{action or 'view'}:{instance_token}:{sl_token}"}])
         rows.append([{"text": "⬅️ 返回实例列表", "callback_data": f"slm:instances:1:{action or 'view'}"}, {"text": "🏠 主菜单", "callback_data": "slm:home"}])
         return "\n".join(lines), build_inline_keyboard(rows)
 
