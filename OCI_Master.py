@@ -186,7 +186,71 @@ def get_oci_config(app_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any
     return oci.config.from_file(profile_name=profile)
 
 
-def get_identity_domains_client(config: Dict[str, Any], domain_name: str = "Default"):
+def get_default_compartment_id(config: Dict[str, Any], app_config: Optional[Dict[str, Any]] = None) -> str:
+    """获取默认 compartment_id；未配置时回退到 tenancy 根 compartment。"""
+    app_config = app_config or {}
+    network_firewall_cfg = app_config.get("network_firewall", {})
+    return (
+        network_firewall_cfg.get("default_compartment_id")
+        or app_config.get("oci", {}).get("compartment_id")
+        or config.get("tenancy")
+    )
+
+
+def _normalize_collection_items(data: Any) -> List[Any]:
+    """兼容 OCI SDK 返回 list 或 *Collection(items=[])."""
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return data
+    return getattr(data, "items", []) or []
+
+
+def _protocol_name(value: Any) -> str:
+    mapping = {
+        "1": "ICMP",
+        "6": "TCP",
+        "17": "UDP",
+        "58": "ICMPv6",
+        "all": "ALL",
+    }
+    key = str(value).lower()
+    return mapping.get(key, str(value))
+
+
+def _format_port_range(port_range: Any) -> str:
+    if not port_range:
+        return "all"
+    min_port = safe_get(port_range, "min", default=None)
+    max_port = safe_get(port_range, "max", default=None)
+    if min_port in (None, "N/A") and max_port in (None, "N/A"):
+        return "all"
+    if min_port == max_port:
+        return str(min_port)
+    return f"{min_port}-{max_port}"
+
+
+def _extract_rule_port_text(rule: Any) -> str:
+    tcp_options = safe_get(rule, "tcp_options", default=None)
+    udp_options = safe_get(rule, "udp_options", default=None)
+    icmp_options = safe_get(rule, "icmp_options", default=None)
+    icmp6_options = safe_get(rule, "icmp_options", default=None)
+
+    if tcp_options is not None and not isinstance(tcp_options, str):
+        return f"tcp/{_format_port_range(safe_get(tcp_options, 'destination_port_range', default=None))}"
+    if udp_options is not None and not isinstance(udp_options, str):
+        return f"udp/{_format_port_range(safe_get(udp_options, 'destination_port_range', default=None))}"
+    if icmp_options is not None and not isinstance(icmp_options, str):
+        icmp_type = safe_get(icmp_options, "type", default="*")
+        icmp_code = safe_get(icmp_options, "code", default="*")
+        return f"icmp(type={icmp_type},code={icmp_code})"
+    if icmp6_options is not None and not isinstance(icmp6_options, str):
+        icmp_type = safe_get(icmp6_options, "type", default="*")
+        icmp_code = safe_get(icmp6_options, "code", default="*")
+        return f"icmp6(type={icmp_type},code={icmp_code})"
+    return "all"
+
+
     """获取 Identity Domain 客户端。"""
     identity_client = oci.identity.IdentityClient(config)
     response = identity_client.list_domains(config["tenancy"])
@@ -1047,6 +1111,467 @@ def render_audit_events_telegram(events: List[Any], limit: int = 10) -> str:
     return "\n".join(parts)
 
 
+# ==========================================
+# 计算实例网络安全查询功能
+# ==========================================
+def _get_compute_client(config: Dict[str, Any]):
+    return oci.core.ComputeClient(config)
+
+
+def _get_virtual_network_client(config: Dict[str, Any]):
+    return oci.core.VirtualNetworkClient(config)
+
+
+def _fetch_instance_network_topology(config: Dict[str, Any], instance_id: str) -> Dict[str, Any]:
+    compute_client = _get_compute_client(config)
+    vcn_client = _get_virtual_network_client(config)
+
+    instance = compute_client.get_instance(instance_id).data
+    attachments = oci.pagination.list_call_get_all_results(
+        compute_client.list_vnic_attachments,
+        compartment_id=instance.compartment_id,
+        instance_id=instance_id,
+    ).data
+
+    vnic_entries: List[Dict[str, Any]] = []
+    subnet_cache: Dict[str, Any] = {}
+    sl_cache: Dict[str, Any] = {}
+    nsg_cache: Dict[str, Any] = {}
+
+    for attachment in attachments:
+        vnic = vcn_client.get_vnic(attachment.vnic_id).data
+        subnet = subnet_cache.get(vnic.subnet_id)
+        if subnet is None:
+            subnet = vcn_client.get_subnet(vnic.subnet_id).data
+            subnet_cache[vnic.subnet_id] = subnet
+
+        nsgs: List[Any] = []
+        for nsg_id in getattr(vnic, "nsg_ids", []) or []:
+            nsg = nsg_cache.get(nsg_id)
+            if nsg is None:
+                nsg = vcn_client.get_network_security_group(nsg_id).data
+                nsg_cache[nsg_id] = nsg
+            nsgs.append(nsg)
+
+        security_lists: List[Any] = []
+        for sl_id in getattr(subnet, "security_list_ids", []) or []:
+            sl = sl_cache.get(sl_id)
+            if sl is None:
+                sl = vcn_client.get_security_list(sl_id).data
+                sl_cache[sl_id] = sl
+            security_lists.append(sl)
+
+        vnic_entries.append({
+            "attachment": attachment,
+            "vnic": vnic,
+            "subnet": subnet,
+            "nsgs": nsgs,
+            "security_lists": security_lists,
+        })
+
+    return {
+        "instance": instance,
+        "vnics": vnic_entries,
+    }
+
+
+def _fetch_nsg_rules(config: Dict[str, Any], nsg_id: str) -> Tuple[Any, List[Any]]:
+    vcn_client = _get_virtual_network_client(config)
+    nsg = vcn_client.get_network_security_group(nsg_id).data
+    rules_resp = oci.pagination.list_call_get_all_results(
+        vcn_client.list_network_security_group_security_rules,
+        network_security_group_id=nsg_id,
+    )
+    rules = _normalize_collection_items(getattr(rules_resp, "data", None))
+    return nsg, rules
+
+
+def _fetch_security_list(config: Dict[str, Any], security_list_id: str) -> Any:
+    vcn_client = _get_virtual_network_client(config)
+    return vcn_client.get_security_list(security_list_id).data
+
+
+def _rule_signature(rule: Any, direction: str = "ingress") -> Dict[str, Any]:
+    base: Dict[str, Any] = {
+        "direction": direction,
+        "protocol": safe_get(rule, "protocol", default=None),
+        "is_stateless": safe_get(rule, "is_stateless", default=False),
+        "description": safe_get(rule, "description", default=None),
+    }
+    if direction == "ingress":
+        base["peer"] = safe_get(rule, "source", default=None)
+        base["peer_type"] = safe_get(rule, "source_type", default="CIDR_BLOCK")
+    else:
+        base["peer"] = safe_get(rule, "destination", default=None)
+        base["peer_type"] = safe_get(rule, "destination_type", default="CIDR_BLOCK")
+
+    tcp_options = safe_get(rule, "tcp_options", default=None)
+    udp_options = safe_get(rule, "udp_options", default=None)
+    icmp_options = safe_get(rule, "icmp_options", default=None)
+
+    if tcp_options is not None and not isinstance(tcp_options, str):
+        dest = safe_get(tcp_options, "destination_port_range", default=None)
+        src = safe_get(tcp_options, "source_port_range", default=None)
+        base["tcp_destination_port_range"] = {
+            "min": safe_get(dest, "min", default=None),
+            "max": safe_get(dest, "max", default=None),
+        } if dest not in (None, "N/A") else None
+        base["tcp_source_port_range"] = {
+            "min": safe_get(src, "min", default=None),
+            "max": safe_get(src, "max", default=None),
+        } if src not in (None, "N/A") else None
+    if udp_options is not None and not isinstance(udp_options, str):
+        dest = safe_get(udp_options, "destination_port_range", default=None)
+        src = safe_get(udp_options, "source_port_range", default=None)
+        base["udp_destination_port_range"] = {
+            "min": safe_get(dest, "min", default=None),
+            "max": safe_get(dest, "max", default=None),
+        } if dest not in (None, "N/A") else None
+        base["udp_source_port_range"] = {
+            "min": safe_get(src, "min", default=None),
+            "max": safe_get(src, "max", default=None),
+        } if src not in (None, "N/A") else None
+    if icmp_options is not None and not isinstance(icmp_options, str):
+        base["icmp_options"] = {
+            "type": safe_get(icmp_options, "type", default=None),
+            "code": safe_get(icmp_options, "code", default=None),
+        }
+    return base
+
+
+def _make_port_range(min_port: Optional[int], max_port: Optional[int]):
+    if min_port is None and max_port is None:
+        return None
+    if max_port is None:
+        max_port = min_port
+    return oci.core.models.PortRange(min=min_port, max=max_port)
+
+
+def _build_ingress_rule_model(
+    protocol: str,
+    source: str,
+    source_type: str = "CIDR_BLOCK",
+    port_min: Optional[int] = None,
+    port_max: Optional[int] = None,
+    stateless: bool = False,
+    description: Optional[str] = None,
+) -> Any:
+    kwargs: Dict[str, Any] = {
+        "protocol": str(protocol),
+        "source": source,
+        "source_type": source_type,
+        "is_stateless": stateless,
+        "description": description,
+    }
+    if str(protocol) == "6":
+        kwargs["tcp_options"] = oci.core.models.TcpOptions(
+            destination_port_range=_make_port_range(port_min, port_max)
+        )
+    elif str(protocol) == "17":
+        kwargs["udp_options"] = oci.core.models.UdpOptions(
+            destination_port_range=_make_port_range(port_min, port_max)
+        )
+    return oci.core.models.IngressSecurityRule(**kwargs)
+
+
+def export_security_list_rules(
+    app_config: Optional[Dict[str, Any]] = None,
+    security_list_id: Optional[str] = None,
+    output_path: Optional[str] = None,
+) -> str:
+    if not security_list_id:
+        raise ValueError("缺少 security_list_id")
+    app_config = app_config or load_app_config()
+    config = get_oci_config(app_config)
+    security_list = _fetch_security_list(config, security_list_id)
+    payload = {
+        "security_list": oci.util.to_dict(security_list),
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+    }
+    target = output_path or os.path.join(
+        BASE_DIR,
+        "backups",
+        f"security_list_{security_list_id.split('.')[-1]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+    )
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return target
+
+
+def _update_security_list_rules(config: Dict[str, Any], security_list: Any, ingress_rules: List[Any], egress_rules: List[Any]) -> Any:
+    vcn_client = _get_virtual_network_client(config)
+    details = oci.core.models.UpdateSecurityListDetails(
+        display_name=safe_get(security_list, "display_name"),
+        ingress_security_rules=ingress_rules,
+        egress_security_rules=egress_rules,
+        freeform_tags=safe_get(security_list, "freeform_tags", default={}),
+        defined_tags=safe_get(security_list, "defined_tags", default={}),
+    )
+    return vcn_client.update_security_list(security_list.id, details, if_match=getattr(security_list, 'etag', None))
+
+
+def add_security_list_ingress_rule(
+    app_config: Optional[Dict[str, Any]] = None,
+    security_list_id: Optional[str] = None,
+    source: Optional[str] = None,
+    protocol: str = "6",
+    port_min: Optional[int] = None,
+    port_max: Optional[int] = None,
+    description: Optional[str] = None,
+    stateless: bool = False,
+    apply: bool = False,
+) -> None:
+    print("\n" + "=" * 80)
+    print("➕ 准备添加 Security List Ingress 规则...")
+    if not security_list_id or not source:
+        print("❌ 缺少 security_list_id 或 source")
+        return
+    try:
+        app_config = app_config or load_app_config()
+        config = get_oci_config(app_config)
+        backup_path = export_security_list_rules(app_config, security_list_id)
+        security_list = _fetch_security_list(config, security_list_id)
+        ingress_rules = list(getattr(security_list, "ingress_security_rules", []) or [])
+        egress_rules = list(getattr(security_list, "egress_security_rules", []) or [])
+        new_rule = _build_ingress_rule_model(protocol, source, port_min=port_min, port_max=port_max, description=description, stateless=stateless)
+        ingress_rules.append(new_rule)
+        print(f"✅ 已生成备份: {backup_path}")
+        print(f"预览新增规则: {_format_rule_target(new_rule)}")
+        print(f"变更后 Ingress 条数: {len(ingress_rules)}")
+        if not apply:
+            print("ℹ️ 当前为预览模式，未实际提交。追加 --apply 才会落库。")
+            return
+        res = _update_security_list_rules(config, security_list, ingress_rules, egress_rules)
+        print(f"✅ 已提交更新，HTTP {getattr(res, 'status', 'N/A')}")
+    except Exception as e:
+        LOGGER.exception("添加 Security List Ingress 规则失败")
+        print(f"❌ 操作失败: {e}")
+
+
+def remove_security_list_ingress_rule(
+    app_config: Optional[Dict[str, Any]] = None,
+    security_list_id: Optional[str] = None,
+    rule_index: Optional[int] = None,
+    apply: bool = False,
+) -> None:
+    print("\n" + "=" * 80)
+    print("➖ 准备删除 Security List Ingress 规则...")
+    if not security_list_id or rule_index is None:
+        print("❌ 缺少 security_list_id 或 rule_index")
+        return
+    try:
+        app_config = app_config or load_app_config()
+        config = get_oci_config(app_config)
+        backup_path = export_security_list_rules(app_config, security_list_id)
+        security_list = _fetch_security_list(config, security_list_id)
+        ingress_rules = list(getattr(security_list, "ingress_security_rules", []) or [])
+        egress_rules = list(getattr(security_list, "egress_security_rules", []) or [])
+        if rule_index < 1 or rule_index > len(ingress_rules):
+            print(f"❌ rule_index 超出范围。当前 Ingress 条数: {len(ingress_rules)}")
+            return
+        removed = ingress_rules.pop(rule_index - 1)
+        print(f"✅ 已生成备份: {backup_path}")
+        print(f"预览删除规则: {_format_rule_target(removed)}")
+        print(f"变更后 Ingress 条数: {len(ingress_rules)}")
+        if not apply:
+            print("ℹ️ 当前为预览模式，未实际提交。追加 --apply 才会落库。")
+            return
+        res = _update_security_list_rules(config, security_list, ingress_rules, egress_rules)
+        print(f"✅ 已提交更新，HTTP {getattr(res, 'status', 'N/A')}")
+    except Exception as e:
+        LOGGER.exception("删除 Security List Ingress 规则失败")
+        print(f"❌ 操作失败: {e}")
+
+
+def _format_rule_target(rule: Any) -> str:
+    protocol_name = _protocol_name(safe_get(rule, "protocol"))
+    source = safe_get_any(rule, "source", "destination", default="N/A")
+    port_text = _extract_rule_port_text(rule)
+    desc = safe_get(rule, "description", default="")
+    stateless = safe_get(rule, "is_stateless", default=False)
+    return f"{protocol_name} {port_text}, peer={source}, stateless={stateless}, desc={desc or '-'}"
+
+
+def _print_instance_network_topology(topology: Dict[str, Any]) -> None:
+    instance = topology["instance"]
+    entries = topology["vnics"]
+
+    print_section("实例网络安全总览", "🧱")
+    print_kv("实例名称", safe_get(instance, "display_name"))
+    print_kv("实例 OCID", safe_get(instance, "id"))
+    print_kv("状态", safe_get(instance, "lifecycle_state"))
+    print_kv("Compartment OCID", safe_get(instance, "compartment_id"))
+    print_kv("VNIC 数量", len(entries))
+
+    for index, entry in enumerate(entries, 1):
+        vnic = entry["vnic"]
+        subnet = entry["subnet"]
+        nsgs = entry["nsgs"]
+        security_lists = entry["security_lists"]
+        print_section(f"VNIC #{index}", "🌐")
+        print_kv("VNIC 名称", safe_get(vnic, "display_name"))
+        print_kv("VNIC OCID", safe_get(vnic, "id"))
+        print_kv("Private IP", safe_get(vnic, "private_ip"))
+        print_kv("Public IP", safe_get(vnic, "public_ip", default="(无)"))
+        print_kv("Subnet OCID", safe_get(subnet, "id"))
+        print_kv("Subnet 名称", safe_get(subnet, "display_name"))
+        print_kv("VCN OCID", safe_get(subnet, "vcn_id"))
+        print_kv("NSG 数量", len(nsgs))
+        for nsg in nsgs:
+            print(f"  - NSG: {safe_get(nsg, 'display_name')} | {safe_get(nsg, 'id')}")
+        print_kv("Security List 数量", len(security_lists))
+        for sl in security_lists:
+            print(f"  - Security List: {safe_get(sl, 'display_name')} | {safe_get(sl, 'id')}")
+
+
+def _print_nsg_rules(nsg: Any, rules: List[Any]) -> None:
+    print_section("NSG 规则", "🛡️")
+    print_kv("NSG 名称", safe_get(nsg, "display_name"))
+    print_kv("NSG OCID", safe_get(nsg, "id"))
+    print_kv("规则数", len(rules))
+    if not rules:
+        print("📭 (无 NSG 规则)")
+        return
+    for idx, rule in enumerate(rules, 1):
+        print(f"{idx:>2}. {safe_get(rule, 'direction')} | {_format_rule_target(rule)}")
+
+
+def _print_security_list_rules(security_list: Any) -> None:
+    ingress = getattr(security_list, "ingress_security_rules", []) or []
+    egress = getattr(security_list, "egress_security_rules", []) or []
+    print_section("Security List 规则", "📋")
+    print_kv("名称", safe_get(security_list, "display_name"))
+    print_kv("OCID", safe_get(security_list, "id"))
+    print_kv("Ingress 条数", len(ingress))
+    for idx, rule in enumerate(ingress, 1):
+        print(f"  Ingress {idx:>2}: {_format_rule_target(rule)}")
+    print_kv("Egress 条数", len(egress))
+    for idx, rule in enumerate(egress, 1):
+        print(f"  Egress  {idx:>2}: {_format_rule_target(rule)}")
+
+
+def render_instance_network_telegram(topology: Dict[str, Any]) -> str:
+    instance = topology["instance"]
+    entries = topology["vnics"]
+    parts = [
+        "<b>🧱 实例网络安全总览</b>",
+        f"实例: <b>{html.escape(str(safe_get(instance, 'display_name')))}</b>",
+        f"状态: <code>{html.escape(str(safe_get(instance, 'lifecycle_state')))}</code>",
+        f"实例 OCID: <code>{html.escape(str(safe_get(instance, 'id')))}</code>",
+        f"VNIC 数量: <code>{len(entries)}</code>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    for idx, entry in enumerate(entries, 1):
+        vnic = entry["vnic"]
+        subnet = entry["subnet"]
+        nsgs = entry["nsgs"]
+        security_lists = entry["security_lists"]
+        parts.append(f"\n🌐 <b>VNIC #{idx}: {html.escape(str(safe_get(vnic, 'display_name')))}</b>")
+        parts.append(f"   🔒 Private IP: <code>{html.escape(str(safe_get(vnic, 'private_ip')))}</code>")
+        parts.append(f"   🌍 Public IP: <code>{html.escape(str(safe_get(vnic, 'public_ip', default='(无)')))}</code>")
+        parts.append(f"   📦 Subnet: <code>{html.escape(str(safe_get(subnet, 'display_name')))}</code>")
+        if nsgs:
+            for nsg in nsgs:
+                parts.append(f"   🛡️ NSG: <code>{html.escape(str(safe_get(nsg, 'display_name')))}</code>")
+        else:
+            parts.append("   🛡️ NSG: <i>(无)</i>")
+        if security_lists:
+            for sl in security_lists:
+                parts.append(f"   📋 SL: <code>{html.escape(str(safe_get(sl, 'display_name')))}</code>")
+        else:
+            parts.append("   📋 SL: <i>(无)</i>")
+    return "\n".join(parts)
+
+
+def render_nsg_rules_telegram(nsg: Any, rules: List[Any]) -> str:
+    parts = [
+        "<b>🛡️ NSG 规则</b>",
+        f"名称: <b>{html.escape(str(safe_get(nsg, 'display_name')))}</b>",
+        f"OCID: <code>{html.escape(str(safe_get(nsg, 'id')))}</code>",
+        f"规则数: <code>{len(rules)}</code>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    if not rules:
+        parts.append("📭 <i>无 NSG 规则</i>")
+        return "\n".join(parts)
+    for idx, rule in enumerate(rules, 1):
+        parts.append(f"\n{idx}. <b>{html.escape(str(safe_get(rule, 'direction')))}</b>")
+        parts.append(f"   <code>{html.escape(_format_rule_target(rule))}</code>")
+    return "\n".join(parts)
+
+
+def render_security_list_rules_telegram(security_list: Any) -> str:
+    ingress = getattr(security_list, "ingress_security_rules", []) or []
+    egress = getattr(security_list, "egress_security_rules", []) or []
+    parts = [
+        "<b>📋 Security List 规则</b>",
+        f"名称: <b>{html.escape(str(safe_get(security_list, 'display_name')))}</b>",
+        f"OCID: <code>{html.escape(str(safe_get(security_list, 'id')))}</code>",
+        f"Ingress: <code>{len(ingress)}</code> | Egress: <code>{len(egress)}</code>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    if ingress:
+        parts.append("\n<b>Ingress</b>")
+        for idx, rule in enumerate(ingress, 1):
+            parts.append(f"{idx}. <code>{html.escape(_format_rule_target(rule))}</code>")
+    if egress:
+        parts.append("\n<b>Egress</b>")
+        for idx, rule in enumerate(egress, 1):
+            parts.append(f"{idx}. <code>{html.escape(_format_rule_target(rule))}</code>")
+    if not ingress and not egress:
+        parts.append("📭 <i>无 Security List 规则</i>")
+    return "\n".join(parts)
+
+
+def show_instance_network(app_config: Optional[Dict[str, Any]] = None, instance_id: Optional[str] = None) -> None:
+    print("\n" + "=" * 80)
+    print("🧱 正在获取实例网络安全总览...")
+    if not instance_id:
+        print("❌ 缺少 instance_id")
+        return
+    try:
+        app_config = app_config or load_app_config()
+        config = get_oci_config(app_config)
+        topology = _fetch_instance_network_topology(config, instance_id)
+        _print_instance_network_topology(topology)
+    except Exception as e:
+        LOGGER.exception("查询实例网络安全总览失败")
+        print(f"❌ 查询失败: {e}")
+
+
+def show_nsg_rules(app_config: Optional[Dict[str, Any]] = None, nsg_id: Optional[str] = None) -> None:
+    print("\n" + "=" * 80)
+    print("🛡️ 正在获取 NSG 规则...")
+    if not nsg_id:
+        print("❌ 缺少 nsg_id")
+        return
+    try:
+        app_config = app_config or load_app_config()
+        config = get_oci_config(app_config)
+        nsg, rules = _fetch_nsg_rules(config, nsg_id)
+        _print_nsg_rules(nsg, rules)
+    except Exception as e:
+        LOGGER.exception("查询 NSG 规则失败")
+        print(f"❌ 查询失败: {e}")
+
+
+def show_security_list_rules(app_config: Optional[Dict[str, Any]] = None, security_list_id: Optional[str] = None) -> None:
+    print("\n" + "=" * 80)
+    print("📋 正在获取 Security List 规则...")
+    if not security_list_id:
+        print("❌ 缺少 security_list_id")
+        return
+    try:
+        app_config = app_config or load_app_config()
+        config = get_oci_config(app_config)
+        security_list = _fetch_security_list(config, security_list_id)
+        _print_security_list_rules(security_list)
+    except Exception as e:
+        LOGGER.exception("查询 Security List 规则失败")
+        print(f"❌ 查询失败: {e}")
+
+
 def create_safe_policy(app_config: Optional[Dict[str, Any]] = None, auto_approve: bool = False) -> None:
     """功能 4：创建永不过期安全策略。"""
     print("\n" + "=" * 80)
@@ -1279,6 +1804,9 @@ class TelegramBotRunner:
             {"command": "usage_fee", "description": "查询本月费用账单"},
             {"command": "policies", "description": "查询密码策略看板"},
             {"command": "audit_events", "description": "查询审计事件日志"},
+            {"command": "instance_network", "description": "查询实例网络安全总览"},
+            {"command": "nsg_rules", "description": "查询 NSG 规则"},
+            {"command": "sl_rules", "description": "查询 Security List 规则"},
             {"command": "create_safe_policy", "description": "创建永不过期安全策略"},
             {"command": "delete_policy", "description": "删除指定密码策略"},
         ]
@@ -1311,7 +1839,10 @@ class TelegramBotRunner:
             "👤 /user_info - 查看用户账号信息\n"
             "💰 /usage_fee - 本月费用账单\n"
             "🛡️ /policies - 密码策略看板\n"
-            "📋 /audit_events - 审计事件日志\n\n"
+            "📋 /audit_events - 审计事件日志\n"
+            "🧱 /instance_network &lt;instance_ocid&gt; - 实例网络安全总览\n"
+            "🛡️ /nsg_rules &lt;nsg_ocid&gt; - NSG 规则\n"
+            "📋 /sl_rules &lt;security_list_ocid&gt; - Security List 规则\n\n"
             "<b>⚙️ 管理命令</b>\n"
             "🔒 /create_safe_policy - 创建永不过期策略\n"
             "🗑️ /delete_policy &lt;名称&gt; - 删除指定策略\n\n"
@@ -1392,6 +1923,42 @@ class TelegramBotRunner:
             except Exception as e:
                 LOGGER.exception("查询审计事件失败")
                 return f"❌ 查询失败: {str(e)[:200]}"
+        if normalized.startswith("/instance_network"):
+            try:
+                parts = normalized.split(maxsplit=1)
+                if len(parts) < 2:
+                    return "请提供实例 OCID，例如：/instance_network ocid1.instance.oc1..."
+                app_config = self.app_config or load_app_config()
+                config = get_oci_config(app_config)
+                topology = _fetch_instance_network_topology(config, parts[1].strip())
+                return render_instance_network_telegram(topology)
+            except Exception as e:
+                LOGGER.exception("查询实例网络安全总览失败")
+                return f"❌ 查询失败: {str(e)[:200]}"
+        if normalized.startswith("/nsg_rules"):
+            try:
+                parts = normalized.split(maxsplit=1)
+                if len(parts) < 2:
+                    return "请提供 NSG OCID，例如：/nsg_rules ocid1.networksecuritygroup.oc1..."
+                app_config = self.app_config or load_app_config()
+                config = get_oci_config(app_config)
+                nsg, rules = _fetch_nsg_rules(config, parts[1].strip())
+                return render_nsg_rules_telegram(nsg, rules)
+            except Exception as e:
+                LOGGER.exception("查询 NSG 规则失败")
+                return f"❌ 查询失败: {str(e)[:200]}"
+        if normalized.startswith("/sl_rules"):
+            try:
+                parts = normalized.split(maxsplit=1)
+                if len(parts) < 2:
+                    return "请提供 Security List OCID，例如：/sl_rules ocid1.securitylist.oc1..."
+                app_config = self.app_config or load_app_config()
+                config = get_oci_config(app_config)
+                security_list = _fetch_security_list(config, parts[1].strip())
+                return render_security_list_rules_telegram(security_list)
+            except Exception as e:
+                LOGGER.exception("查询 Security List 规则失败")
+                return f"❌ 查询失败: {str(e)[:200]}"
         if normalized.startswith("/create_safe_policy"):
             return capture_output(create_safe_policy, self.app_config, True)
         if normalized.startswith("/delete_policy"):
@@ -1423,6 +1990,12 @@ class TelegramBotRunner:
                 except:
                     pass
             return capture_output(list_audit_events, self.app_config, limit)
+        if action.startswith("instance_network:"):
+            return capture_output(show_instance_network, self.app_config, action.split(":", 1)[1].strip())
+        if action.startswith("nsg_rules:"):
+            return capture_output(show_nsg_rules, self.app_config, action.split(":", 1)[1].strip())
+        if action.startswith("sl_rules:"):
+            return capture_output(show_security_list_rules, self.app_config, action.split(":", 1)[1].strip())
         if action == "create_safe_policy":
             return capture_output(create_safe_policy, self.app_config, True)
         if action.startswith("delete_policy:"):
@@ -1430,7 +2003,7 @@ class TelegramBotRunner:
             if not policy_name:
                 return "delete_policy 动作必须附带策略名，例如 delete_policy:NeverExpireStandard"
             return capture_output(delete_policy, self.app_config, policy_name, True)
-        return "未知 action，可选: user_info, usage_fee, policies, create_safe_policy, delete_policy:<名称>"
+        return "未知 action，可选: user_info, usage_fee, policies, audit_events[:N], instance_network:<OCID>, nsg_rules:<OCID>, sl_rules:<OCID>, create_safe_policy, delete_policy:<名称>"
 
     def handle_callback_query(self, callback_query: Dict[str, Any]) -> None:
         callback_query_id = str(callback_query.get("id", ""))
@@ -1561,9 +2134,11 @@ def print_cli_menu() -> None:
     print("  2. 💰 导出本月费用账单 (CSV)")
     print("  3. 🛡️  查询当前密码策略看板")
     print("  4. 📋 查询审计事件日志")
-    print("  5. 🔒 创建/修复永不过期安全策略")
-    print("  6. 🗑️  删除冗余密码策略")
-    print("  7. 🤖 启动 Telegram Bot 轮询")
+    print("  5. 🔥 查询网络防火墙策略列表")
+    print("  6. 🧱 查询网络防火墙实例列表")
+    print("  7. 🔒 创建/修复永不过期安全策略")
+    print("  8. 🗑️  删除冗余密码策略")
+    print("  9. 🤖 启动 Telegram Bot 轮询")
     print("  0. 🚪 退出程序")
     print("=" * 62)
 
@@ -1573,11 +2148,11 @@ def main_menu(app_config: Dict[str, Any]) -> None:
 
     while True:
         print_cli_menu()
-        choice = input("👉 请选择要执行的功能 (0-7): ").strip()
+        choice = input("👉 请选择要执行的功能 (0-9): ").strip()
 
-        if choice not in ["0", "1", "2", "3", "4", "5", "6", "7"]:
+        if choice not in ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]:
             os.system(clear_cmd)
-            print("❌ 指令无效！请重新输入菜单前方的数字 (0 到 7 之间)。")
+            print("❌ 指令无效！请重新输入菜单前方的数字 (0 到 9 之间)。")
             continue
 
         if choice == "1":
@@ -1589,10 +2164,14 @@ def main_menu(app_config: Dict[str, Any]) -> None:
         elif choice == "4":
             list_audit_events(app_config)
         elif choice == "5":
-            create_safe_policy(app_config)
+            list_network_firewall_policies(app_config)
         elif choice == "6":
-            delete_policy(app_config)
+            list_network_firewalls(app_config)
         elif choice == "7":
+            create_safe_policy(app_config)
+        elif choice == "8":
+            delete_policy(app_config)
+        elif choice == "9":
             TelegramBotRunner(app_config).run_polling()
         elif choice == "0":
             print("\n👋 感谢使用，已安全退出程序！\n")
@@ -1625,6 +2204,34 @@ def main() -> None:
     ae.add_argument("--sort-by", default="timestamp", help="排序字段（默认 timestamp）")
     ae.add_argument("--sort-order", choices=["ASCENDING", "DESCENDING"], default="DESCENDING", help="排序方向")
 
+    inet = sub.add_parser("instance-network", help="查询实例网络安全总览")
+    inet.add_argument("instance_id", help="实例 OCID")
+
+    nsg = sub.add_parser("nsg-rules", help="查询 NSG 规则")
+    nsg.add_argument("nsg_id", help="NSG 的 OCID")
+
+    sl = sub.add_parser("security-list-rules", help="查询 Security List 规则")
+    sl.add_argument("security_list_id", help="Security List 的 OCID")
+
+    sle = sub.add_parser("security-list-export", help="导出 Security List 规则备份")
+    sle.add_argument("security_list_id", help="Security List 的 OCID")
+    sle.add_argument("--output", help="导出 JSON 路径")
+
+    sla = sub.add_parser("security-list-add-ingress", help="添加 Security List Ingress 规则（默认预览）")
+    sla.add_argument("security_list_id", help="Security List 的 OCID")
+    sla.add_argument("--source", required=True, help="来源 CIDR，例如 0.0.0.0/0")
+    sla.add_argument("--protocol", default="6", help="协议号，默认 6(TCP)")
+    sla.add_argument("--port-min", type=int, help="目标最小端口")
+    sla.add_argument("--port-max", type=int, help="目标最大端口")
+    sla.add_argument("--description", help="规则描述")
+    sla.add_argument("--stateless", action="store_true", help="是否为无状态规则")
+    sla.add_argument("--apply", action="store_true", help="真正提交变更；默认仅预览")
+
+    slr = sub.add_parser("security-list-remove-ingress", help="删除 Security List Ingress 规则（默认预览）")
+    slr.add_argument("security_list_id", help="Security List 的 OCID")
+    slr.add_argument("--rule-index", type=int, required=True, help="要删除的 Ingress 规则序号（从 1 开始）")
+    slr.add_argument("--apply", action="store_true", help="真正提交变更；默认仅预览")
+
     csp = sub.add_parser("create-safe-policy", help="创建/修复永不过期安全策略")
     csp.add_argument("--auto-approve", action="store_true", help="无需交互确认")
 
@@ -1634,7 +2241,7 @@ def main() -> None:
 
     # 兼容旧版 run action
     runp = sub.add_parser("run", help="兼容旧版：运行预设动作")
-    runp.add_argument("action", help="user_info|usage_fee|policies|create_safe_policy|delete_policy:<名称>")
+    runp.add_argument("action", help="user_info|usage_fee|policies|audit_events[:N]|instance_network:<OCID>|nsg_rules:<OCID>|sl_rules:<OCID>|create_safe_policy|delete_policy:<名称>")
 
     args = parser.parse_args()
 
@@ -1665,6 +2272,34 @@ def main() -> None:
             sort_by=args.sort_by,
             sort_order=args.sort_order
         )
+    if args.cmd == "instance-network":
+        return show_instance_network(app_config, instance_id=args.instance_id)
+    if args.cmd == "nsg-rules":
+        return show_nsg_rules(app_config, nsg_id=args.nsg_id)
+    if args.cmd == "security-list-rules":
+        return show_security_list_rules(app_config, security_list_id=args.security_list_id)
+    if args.cmd == "security-list-export":
+        print(export_security_list_rules(app_config, security_list_id=args.security_list_id, output_path=args.output))
+        return
+    if args.cmd == "security-list-add-ingress":
+        return add_security_list_ingress_rule(
+            app_config,
+            security_list_id=args.security_list_id,
+            source=args.source,
+            protocol=args.protocol,
+            port_min=args.port_min,
+            port_max=args.port_max,
+            description=args.description,
+            stateless=args.stateless,
+            apply=args.apply,
+        )
+    if args.cmd == "security-list-remove-ingress":
+        return remove_security_list_ingress_rule(
+            app_config,
+            security_list_id=args.security_list_id,
+            rule_index=args.rule_index,
+            apply=args.apply,
+        )
     if args.cmd == "create-safe-policy":
         return create_safe_policy(app_config, auto_approve=args.auto_approve)
     if args.cmd == "delete-policy":
@@ -1677,11 +2312,17 @@ def main() -> None:
             return export_usage_fee(app_config)
         if action == "policies":
             return list_policies(app_config)
+        if action.startswith("instance_network:"):
+            return show_instance_network(app_config, instance_id=action.split(":", 1)[1].strip())
+        if action.startswith("nsg_rules:"):
+            return show_nsg_rules(app_config, nsg_id=action.split(":", 1)[1].strip())
+        if action.startswith("sl_rules:"):
+            return show_security_list_rules(app_config, security_list_id=action.split(":", 1)[1].strip())
         if action == "create_safe_policy":
             return create_safe_policy(app_config, auto_approve=True)
         if action.startswith("delete_policy:"):
             return delete_policy(app_config, target_name=action.split(":", 1)[1].strip(), auto_approve=True)
-        raise ValueError("不支持的 action。可选: user_info, usage_fee, policies, create_safe_policy, delete_policy:<名称>")
+        raise ValueError("不支持的 action。可选: user_info, usage_fee, policies, audit_events[:N], instance_network:<OCID>, nsg_rules:<OCID>, sl_rules:<OCID>, create_safe_policy, delete_policy:<名称>")
 
 
 if __name__ == "__main__":
