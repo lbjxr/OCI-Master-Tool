@@ -2206,9 +2206,9 @@ class TelegramBotRunner:
     def build_sl_root_keyboard(self) -> Dict[str, Any]:
         return build_inline_keyboard([
             [{"text": "📝 查看安全列表", "callback_data": "slm:start:view"}],
-            [{"text": "📥 新增入站", "callback_data": "slm:start:add_ingress"}, {"text": "📤 新增出站", "callback_data": "slm:start:add_egress"}],
-            [{"text": "🚫 删除入站", "callback_data": "slm:start:delete_ingress"}, {"text": "⛔ 删除出站", "callback_data": "slm:start:delete_egress"}],
-            [{"text": "🔄 替换入站", "callback_data": "slm:start:replace_ingress"}, {"text": "↪️ 替换出站", "callback_data": "slm:start:replace_egress"}],
+            [{"text": "⬇️ 新增入站", "callback_data": "slm:start:add_ingress"}, {"text": "⬆️ 新增出站", "callback_data": "slm:start:add_egress"}],
+            [{"text": "🚫 删除入站", "callback_data": "slm:start:delete_ingress"}, {"text": "❌ 删除出站", "callback_data": "slm:start:delete_egress"}],
+            [{"text": "🔁 替换入站", "callback_data": "slm:start:replace_ingress"}, {"text": "♻️ 替换出站", "callback_data": "slm:start:replace_egress"}],
         ])
 
     def _sl_action_label(self, action: Optional[str]) -> str:
