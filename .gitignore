@@ -5,3 +5,4 @@ backups/
 *.bak
 *.bak-*
 *.bak_*
+.telegram_menu_sessions.json
