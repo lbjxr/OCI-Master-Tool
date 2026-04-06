@@ -5,8 +5,10 @@ import sys
 import time
 import html
 import csv
+import math
 import logging
 import argparse
+import ipaddress
 from pathlib import Path
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
@@ -102,6 +104,12 @@ def build_text_table(headers: List[str], rows: List[List[Any]]) -> str:
 
 def build_inline_keyboard(button_rows: List[List[Dict[str, str]]]) -> Dict[str, Any]:
     return {"inline_keyboard": button_rows}
+
+
+def chunk_list(items: List[Any], size: int) -> List[List[Any]]:
+    if size <= 0:
+        return [items]
+    return [items[i:i + size] for i in range(0, len(items), size)]
 
 
 # ==========================================
@@ -251,6 +259,7 @@ def _extract_rule_port_text(rule: Any) -> str:
     return "all"
 
 
+def get_identity_domains_client(config: Dict[str, Any], domain_name: str = "Default"):
     """获取 Identity Domain 客户端。"""
     identity_client = oci.identity.IdentityClient(config)
     response = identity_client.list_domains(config["tenancy"])
@@ -273,6 +282,33 @@ def capture_output(func: Callable, *args, **kwargs) -> str:
     with redirect_stdout(buffer):
         func(*args, **kwargs)
     return buffer.getvalue().strip()
+
+
+def normalize_protocol_value(value: Optional[str]) -> str:
+    text = str(value or "").strip().lower()
+    alias_map = {
+        "all": "all",
+        "any": "all",
+        "tcp": "6",
+        "udp": "17",
+        "icmp": "1",
+        "icmpv6": "58",
+        "icmp6": "58",
+        "6": "6",
+        "17": "17",
+        "1": "1",
+        "58": "58",
+    }
+    return alias_map.get(text, str(value or "6").strip())
+
+
+def parse_sl_command_args(parts: List[str], min_len: int) -> Tuple[List[str], bool]:
+    apply = False
+    tokens = list(parts)
+    if tokens and tokens[-1] == "--apply":
+        apply = True
+        tokens = tokens[:-1]
+    return tokens, apply
 
 
 def get_policy_runtime_config(app_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -1175,16 +1211,6 @@ def _fetch_instance_network_topology(config: Dict[str, Any], instance_id: str) -
     }
 
 
-def _fetch_nsg_rules(config: Dict[str, Any], nsg_id: str) -> Tuple[Any, List[Any]]:
-    vcn_client = _get_virtual_network_client(config)
-    nsg = vcn_client.get_network_security_group(nsg_id).data
-    rules_resp = oci.pagination.list_call_get_all_results(
-        vcn_client.list_network_security_group_security_rules,
-        network_security_group_id=nsg_id,
-    )
-    rules = _normalize_collection_items(getattr(rules_resp, "data", None))
-    return nsg, rules
-
 
 def _fetch_security_list(config: Dict[str, Any], security_list_id: str) -> Any:
     vcn_client = _get_virtual_network_client(config)
@@ -1274,29 +1300,32 @@ def _build_ingress_rule_model(
     return oci.core.models.IngressSecurityRule(**kwargs)
 
 
-def export_security_list_rules(
-    app_config: Optional[Dict[str, Any]] = None,
-    security_list_id: Optional[str] = None,
-    output_path: Optional[str] = None,
-) -> str:
-    if not security_list_id:
-        raise ValueError("缺少 security_list_id")
-    app_config = app_config or load_app_config()
-    config = get_oci_config(app_config)
-    security_list = _fetch_security_list(config, security_list_id)
-    payload = {
-        "security_list": oci.util.to_dict(security_list),
-        "exported_at": datetime.now(timezone.utc).isoformat(),
+def _build_egress_rule_model(
+    protocol: str,
+    destination: str,
+    destination_type: str = "CIDR_BLOCK",
+    port_min: Optional[int] = None,
+    port_max: Optional[int] = None,
+    description: Optional[str] = None,
+    stateless: bool = False,
+) -> Any:
+    kwargs: Dict[str, Any] = {
+        "protocol": str(protocol),
+        "destination": destination,
+        "destination_type": destination_type,
+        "is_stateless": stateless,
+        "description": description,
     }
-    target = output_path or os.path.join(
-        BASE_DIR,
-        "backups",
-        f"security_list_{security_list_id.split('.')[-1]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-    )
-    os.makedirs(os.path.dirname(target), exist_ok=True)
-    with open(target, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    return target
+    if str(protocol) == "6":
+        kwargs["tcp_options"] = oci.core.models.TcpOptions(
+            destination_port_range=_make_port_range(port_min, port_max)
+        )
+    elif str(protocol) == "17":
+        kwargs["udp_options"] = oci.core.models.UdpOptions(
+            destination_port_range=_make_port_range(port_min, port_max)
+        )
+    return oci.core.models.EgressSecurityRule(**kwargs)
+
 
 
 def _update_security_list_rules(config: Dict[str, Any], security_list: Any, ingress_rules: List[Any], egress_rules: List[Any]) -> Any:
@@ -1311,6 +1340,36 @@ def _update_security_list_rules(config: Dict[str, Any], security_list: Any, ingr
     return vcn_client.update_security_list(security_list.id, details, if_match=getattr(security_list, 'etag', None))
 
 
+def render_sl_change_result_telegram(
+    *,
+    title: str,
+    apply: bool,
+    security_list_id: str,
+    backup_path: Optional[str],
+    summary_lines: List[str],
+    count_line: Optional[str] = None,
+    http_status: Optional[Any] = None,
+) -> str:
+    parts = [
+        f"<b>{html.escape(title)}</b>",
+        f"模式：<code>{'提交' if apply else '预览'}</code>",
+        f"安全列表：<code>{html.escape(str(security_list_id))}</code>",
+    ]
+    if summary_lines:
+        parts.append("━━━━━━━━━━━━━━━━━━━━━━")
+        parts.extend(summary_lines)
+    if count_line:
+        parts.append(count_line)
+    if backup_path:
+        parts.append(f"备份：<code>{html.escape(str(backup_path))}</code>")
+    if apply:
+        parts.append(f"结果：✅ 已提交更新（HTTP <code>{html.escape(str(http_status or 'N/A'))}</code>）")
+    else:
+        parts.append("结果：ℹ️ 当前仅预览，未实际提交")
+        parts.append("提交方式：发送对应 *_apply 命令")
+    return "\n".join(parts)
+
+
 def add_security_list_ingress_rule(
     app_config: Optional[Dict[str, Any]] = None,
     security_list_id: Optional[str] = None,
@@ -1322,8 +1381,6 @@ def add_security_list_ingress_rule(
     stateless: bool = False,
     apply: bool = False,
 ) -> None:
-    print("\n" + "=" * 80)
-    print("➕ 准备添加 Security List Ingress 规则...")
     if not security_list_id or not source:
         print("❌ 缺少 security_list_id 或 source")
         return
@@ -1336,17 +1393,22 @@ def add_security_list_ingress_rule(
         egress_rules = list(getattr(security_list, "egress_security_rules", []) or [])
         new_rule = _build_ingress_rule_model(protocol, source, port_min=port_min, port_max=port_max, description=description, stateless=stateless)
         ingress_rules.append(new_rule)
-        print(f"✅ 已生成备份: {backup_path}")
-        print(f"预览新增规则: {_format_rule_target(new_rule)}")
-        print(f"变更后 Ingress 条数: {len(ingress_rules)}")
-        if not apply:
-            print("ℹ️ 当前为预览模式，未实际提交。追加 --apply 才会落库。")
-            return
-        res = _update_security_list_rules(config, security_list, ingress_rules, egress_rules)
-        print(f"✅ 已提交更新，HTTP {getattr(res, 'status', 'N/A')}")
+        http_status = None
+        if apply:
+            res = _update_security_list_rules(config, security_list, ingress_rules, egress_rules)
+            http_status = getattr(res, 'status', 'N/A')
+        print(render_sl_change_result_telegram(
+            title="➕ Security List 入站规则",
+            apply=apply,
+            security_list_id=security_list_id,
+            backup_path=backup_path,
+            summary_lines=[f"新增规则：<code>{html.escape(_format_rule_target(new_rule))}</code>"],
+            count_line=f"变更后入站规则数：<code>{len(ingress_rules)}</code>",
+            http_status=http_status,
+        ))
     except Exception as e:
         LOGGER.exception("添加 Security List Ingress 规则失败")
-        print(f"❌ 操作失败: {e}")
+        print(f"❌ 操作失败: {html.escape(str(e))[:500]}")
 
 
 def remove_security_list_ingress_rule(
@@ -1355,8 +1417,6 @@ def remove_security_list_ingress_rule(
     rule_index: Optional[int] = None,
     apply: bool = False,
 ) -> None:
-    print("\n" + "=" * 80)
-    print("➖ 准备删除 Security List Ingress 规则...")
     if not security_list_id or rule_index is None:
         print("❌ 缺少 security_list_id 或 rule_index")
         return
@@ -1371,26 +1431,243 @@ def remove_security_list_ingress_rule(
             print(f"❌ rule_index 超出范围。当前 Ingress 条数: {len(ingress_rules)}")
             return
         removed = ingress_rules.pop(rule_index - 1)
-        print(f"✅ 已生成备份: {backup_path}")
-        print(f"预览删除规则: {_format_rule_target(removed)}")
-        print(f"变更后 Ingress 条数: {len(ingress_rules)}")
-        if not apply:
-            print("ℹ️ 当前为预览模式，未实际提交。追加 --apply 才会落库。")
-            return
-        res = _update_security_list_rules(config, security_list, ingress_rules, egress_rules)
-        print(f"✅ 已提交更新，HTTP {getattr(res, 'status', 'N/A')}")
+        http_status = None
+        if apply:
+            res = _update_security_list_rules(config, security_list, ingress_rules, egress_rules)
+            http_status = getattr(res, 'status', 'N/A')
+        print(render_sl_change_result_telegram(
+            title="➖ Security List 入站规则",
+            apply=apply,
+            security_list_id=security_list_id,
+            backup_path=backup_path,
+            summary_lines=[
+                f"删除序号：<code>{rule_index}</code>",
+                f"目标规则：<code>{html.escape(_format_rule_target(removed))}</code>",
+            ],
+            count_line=f"变更后入站规则数：<code>{len(ingress_rules)}</code>",
+            http_status=http_status,
+        ))
     except Exception as e:
         LOGGER.exception("删除 Security List Ingress 规则失败")
-        print(f"❌ 操作失败: {e}")
+        print(f"❌ 操作失败: {html.escape(str(e))[:500]}")
+
+
+def add_security_list_egress_rule(
+    app_config: Optional[Dict[str, Any]] = None,
+    security_list_id: Optional[str] = None,
+    destination: Optional[str] = None,
+    protocol: str = "6",
+    port_min: Optional[int] = None,
+    port_max: Optional[int] = None,
+    description: Optional[str] = None,
+    stateless: bool = False,
+    apply: bool = False,
+) -> None:
+    if not security_list_id or not destination:
+        print("❌ 缺少 security_list_id 或 destination")
+        return
+    try:
+        app_config = app_config or load_app_config()
+        config = get_oci_config(app_config)
+        backup_path = export_security_list_rules(app_config, security_list_id)
+        security_list = _fetch_security_list(config, security_list_id)
+        ingress_rules = list(getattr(security_list, "ingress_security_rules", []) or [])
+        egress_rules = list(getattr(security_list, "egress_security_rules", []) or [])
+        new_rule = _build_egress_rule_model(protocol, destination, port_min=port_min, port_max=port_max, description=description, stateless=stateless)
+        egress_rules.append(new_rule)
+        http_status = None
+        if apply:
+            res = _update_security_list_rules(config, security_list, ingress_rules, egress_rules)
+            http_status = getattr(res, 'status', 'N/A')
+        print(render_sl_change_result_telegram(
+            title="➕ Security List 出站规则",
+            apply=apply,
+            security_list_id=security_list_id,
+            backup_path=backup_path,
+            summary_lines=[f"新增规则：<code>{html.escape(_format_rule_target(new_rule))}</code>"],
+            count_line=f"变更后出站规则数：<code>{len(egress_rules)}</code>",
+            http_status=http_status,
+        ))
+    except Exception as e:
+        LOGGER.exception("添加 Security List Egress 规则失败")
+        print(f"❌ 操作失败: {html.escape(str(e))[:500]}")
+
+
+def remove_security_list_egress_rule(
+    app_config: Optional[Dict[str, Any]] = None,
+    security_list_id: Optional[str] = None,
+    rule_index: Optional[int] = None,
+    apply: bool = False,
+) -> None:
+    if not security_list_id or rule_index is None:
+        print("❌ 缺少 security_list_id 或 rule_index")
+        return
+    try:
+        app_config = app_config or load_app_config()
+        config = get_oci_config(app_config)
+        backup_path = export_security_list_rules(app_config, security_list_id)
+        security_list = _fetch_security_list(config, security_list_id)
+        ingress_rules = list(getattr(security_list, "ingress_security_rules", []) or [])
+        egress_rules = list(getattr(security_list, "egress_security_rules", []) or [])
+        if rule_index < 1 or rule_index > len(egress_rules):
+            print(f"❌ rule_index 超出范围。当前 Egress 条数: {len(egress_rules)}")
+            return
+        removed = egress_rules.pop(rule_index - 1)
+        http_status = None
+        if apply:
+            res = _update_security_list_rules(config, security_list, ingress_rules, egress_rules)
+            http_status = getattr(res, 'status', 'N/A')
+        print(render_sl_change_result_telegram(
+            title="➖ Security List 出站规则",
+            apply=apply,
+            security_list_id=security_list_id,
+            backup_path=backup_path,
+            summary_lines=[
+                f"删除序号：<code>{rule_index}</code>",
+                f"目标规则：<code>{html.escape(_format_rule_target(removed))}</code>",
+            ],
+            count_line=f"变更后出站规则数：<code>{len(egress_rules)}</code>",
+            http_status=http_status,
+        ))
+    except Exception as e:
+        LOGGER.exception("删除 Security List Egress 规则失败")
+        print(f"❌ 操作失败: {html.escape(str(e))[:500]}")
+
+
+def replace_security_list_ingress_rule(
+    app_config: Optional[Dict[str, Any]] = None,
+    security_list_id: Optional[str] = None,
+    rule_index: Optional[int] = None,
+    source: Optional[str] = None,
+    protocol: str = "6",
+    port_min: Optional[int] = None,
+    port_max: Optional[int] = None,
+    description: Optional[str] = None,
+    stateless: bool = False,
+    apply: bool = False,
+) -> None:
+    if not security_list_id or rule_index is None or not source:
+        print("❌ 缺少 security_list_id / rule_index / source")
+        return
+    try:
+        app_config = app_config or load_app_config()
+        config = get_oci_config(app_config)
+        backup_path = export_security_list_rules(app_config, security_list_id)
+        security_list = _fetch_security_list(config, security_list_id)
+        ingress_rules = list(getattr(security_list, "ingress_security_rules", []) or [])
+        egress_rules = list(getattr(security_list, "egress_security_rules", []) or [])
+        if rule_index < 1 or rule_index > len(ingress_rules):
+            print(f"❌ rule_index 超出范围。当前 Ingress 条数: {len(ingress_rules)}")
+            return
+        old_rule = ingress_rules[rule_index - 1]
+        new_rule = _build_ingress_rule_model(protocol, source, port_min=port_min, port_max=port_max, description=description, stateless=stateless)
+        ingress_rules[rule_index - 1] = new_rule
+        http_status = None
+        if apply:
+            res = _update_security_list_rules(config, security_list, ingress_rules, egress_rules)
+            http_status = getattr(res, 'status', 'N/A')
+        print(render_sl_change_result_telegram(
+            title="✏️ Security List 入站规则",
+            apply=apply,
+            security_list_id=security_list_id,
+            backup_path=backup_path,
+            summary_lines=[
+                f"替换序号：<code>{rule_index}</code>",
+                f"旧规则：<code>{html.escape(_format_rule_target(old_rule))}</code>",
+                f"新规则：<code>{html.escape(_format_rule_target(new_rule))}</code>",
+            ],
+            count_line=f"变更后入站规则数：<code>{len(ingress_rules)}</code>",
+            http_status=http_status,
+        ))
+    except Exception as e:
+        LOGGER.exception("替换 Security List Ingress 规则失败")
+        print(f"❌ 操作失败: {html.escape(str(e))[:500]}")
+
+
+def replace_security_list_egress_rule(
+    app_config: Optional[Dict[str, Any]] = None,
+    security_list_id: Optional[str] = None,
+    rule_index: Optional[int] = None,
+    destination: Optional[str] = None,
+    protocol: str = "6",
+    port_min: Optional[int] = None,
+    port_max: Optional[int] = None,
+    description: Optional[str] = None,
+    stateless: bool = False,
+    apply: bool = False,
+) -> None:
+    if not security_list_id or rule_index is None or not destination:
+        print("❌ 缺少 security_list_id / rule_index / destination")
+        return
+    try:
+        app_config = app_config or load_app_config()
+        config = get_oci_config(app_config)
+        backup_path = export_security_list_rules(app_config, security_list_id)
+        security_list = _fetch_security_list(config, security_list_id)
+        ingress_rules = list(getattr(security_list, "ingress_security_rules", []) or [])
+        egress_rules = list(getattr(security_list, "egress_security_rules", []) or [])
+        if rule_index < 1 or rule_index > len(egress_rules):
+            print(f"❌ rule_index 超出范围。当前 Egress 条数: {len(egress_rules)}")
+            return
+        old_rule = egress_rules[rule_index - 1]
+        new_rule = _build_egress_rule_model(protocol, destination, port_min=port_min, port_max=port_max, description=description, stateless=stateless)
+        egress_rules[rule_index - 1] = new_rule
+        http_status = None
+        if apply:
+            res = _update_security_list_rules(config, security_list, ingress_rules, egress_rules)
+            http_status = getattr(res, 'status', 'N/A')
+        print(render_sl_change_result_telegram(
+            title="✏️ Security List 出站规则",
+            apply=apply,
+            security_list_id=security_list_id,
+            backup_path=backup_path,
+            summary_lines=[
+                f"替换序号：<code>{rule_index}</code>",
+                f"旧规则：<code>{html.escape(_format_rule_target(old_rule))}</code>",
+                f"新规则：<code>{html.escape(_format_rule_target(new_rule))}</code>",
+            ],
+            count_line=f"变更后出站规则数：<code>{len(egress_rules)}</code>",
+            http_status=http_status,
+        ))
+    except Exception as e:
+        LOGGER.exception("替换 Security List Egress 规则失败")
+        print(f"❌ 操作失败: {html.escape(str(e))[:500]}")
+
+
+def _normalize_port_text(protocol_name: str, port_text: str) -> str:
+    text = str(port_text or "all")
+    prefix_map = {
+        "TCP": "tcp/",
+        "UDP": "udp/",
+        "ICMP": "icmp/",
+        "ICMPv6": "icmpv6/",
+    }
+    prefix = prefix_map.get(str(protocol_name), "")
+    if prefix and text.startswith(prefix):
+        text = text[len(prefix):]
+    return text
+
+
+def _format_rule_parts(rule: Any) -> Dict[str, str]:
+    protocol_name = _protocol_name(safe_get(rule, "protocol"))
+    peer = str(safe_get_any(rule, "source", "destination", default="N/A"))
+    raw_port_text = _extract_rule_port_text(rule)
+    port_text = _normalize_port_text(str(protocol_name), str(raw_port_text))
+    desc = safe_get(rule, "description", default="") or "-"
+    stateless = str(safe_get(rule, "is_stateless", default=False))
+    return {
+        "protocol": str(protocol_name),
+        "ports": str(port_text),
+        "peer": peer,
+        "peer_display": peer,
+        "stateless": stateless,
+        "desc": str(desc),
+    }
 
 
 def _format_rule_target(rule: Any) -> str:
-    protocol_name = _protocol_name(safe_get(rule, "protocol"))
-    source = safe_get_any(rule, "source", "destination", default="N/A")
-    port_text = _extract_rule_port_text(rule)
-    desc = safe_get(rule, "description", default="")
-    stateless = safe_get(rule, "is_stateless", default=False)
-    return f"{protocol_name} {port_text}, peer={source}, stateless={stateless}, desc={desc or '-'}"
+    parts = _format_rule_parts(rule)
+    return f"{parts['protocol']} {parts['ports']}, peer={parts['peer']}, stateless={parts['stateless']}, desc={parts['desc']}"
 
 
 def _print_instance_network_topology(topology: Dict[str, Any]) -> None:
@@ -1425,41 +1702,33 @@ def _print_instance_network_topology(topology: Dict[str, Any]) -> None:
             print(f"  - Security List: {safe_get(sl, 'display_name')} | {safe_get(sl, 'id')}")
 
 
-def _print_nsg_rules(nsg: Any, rules: List[Any]) -> None:
-    print_section("NSG 规则", "🛡️")
-    print_kv("NSG 名称", safe_get(nsg, "display_name"))
-    print_kv("NSG OCID", safe_get(nsg, "id"))
-    print_kv("规则数", len(rules))
-    if not rules:
-        print("📭 (无 NSG 规则)")
-        return
-    for idx, rule in enumerate(rules, 1):
-        print(f"{idx:>2}. {safe_get(rule, 'direction')} | {_format_rule_target(rule)}")
 
-
-def _print_security_list_rules(security_list: Any) -> None:
-    ingress = getattr(security_list, "ingress_security_rules", []) or []
-    egress = getattr(security_list, "egress_security_rules", []) or []
-    print_section("Security List 规则", "📋")
-    print_kv("名称", safe_get(security_list, "display_name"))
-    print_kv("OCID", safe_get(security_list, "id"))
-    print_kv("Ingress 条数", len(ingress))
-    for idx, rule in enumerate(ingress, 1):
-        print(f"  Ingress {idx:>2}: {_format_rule_target(rule)}")
-    print_kv("Egress 条数", len(egress))
-    for idx, rule in enumerate(egress, 1):
-        print(f"  Egress  {idx:>2}: {_format_rule_target(rule)}")
+def _translate_lifecycle_state(value: Any) -> str:
+    mapping = {
+        "RUNNING": "运行中",
+        "STOPPED": "已停止",
+        "STARTING": "启动中",
+        "STOPPING": "停止中",
+        "TERMINATED": "已终止",
+        "TERMINATING": "终止中",
+        "PROVISIONING": "配置中",
+        "SCALING": "扩缩容中",
+        "MIGRATING": "迁移中",
+        "UNKNOWN": "未知",
+    }
+    text = str(value or "")
+    return mapping.get(text.upper(), text or "未知")
 
 
 def render_instance_network_telegram(topology: Dict[str, Any]) -> str:
     instance = topology["instance"]
     entries = topology["vnics"]
     parts = [
-        "<b>🧱 实例网络安全总览</b>",
-        f"实例: <b>{html.escape(str(safe_get(instance, 'display_name')))}</b>",
-        f"状态: <code>{html.escape(str(safe_get(instance, 'lifecycle_state')))}</code>",
-        f"实例 OCID: <code>{html.escape(str(safe_get(instance, 'id')))}</code>",
-        f"VNIC 数量: <code>{len(entries)}</code>",
+        "<b>━━━ 🧱 实例网络安全总览 ━━━</b>",
+        f"🏷️ 实例: <b>{html.escape(str(safe_get(instance, 'display_name')))}</b>",
+        f"📌 状态: <code>{html.escape(_translate_lifecycle_state(safe_get(instance, 'lifecycle_state')))}</code>",
+        f"🆔 实例 OCID: <code>{html.escape(str(safe_get(instance, 'id')))}</code>",
+        f"🌐 网卡数量: <code>{len(entries)}</code>",
         "━━━━━━━━━━━━━━━━━━━━━━",
     ]
     for idx, entry in enumerate(entries, 1):
@@ -1467,60 +1736,120 @@ def render_instance_network_telegram(topology: Dict[str, Any]) -> str:
         subnet = entry["subnet"]
         nsgs = entry["nsgs"]
         security_lists = entry["security_lists"]
-        parts.append(f"\n🌐 <b>VNIC #{idx}: {html.escape(str(safe_get(vnic, 'display_name')))}</b>")
-        parts.append(f"   🔒 Private IP: <code>{html.escape(str(safe_get(vnic, 'private_ip')))}</code>")
-        parts.append(f"   🌍 Public IP: <code>{html.escape(str(safe_get(vnic, 'public_ip', default='(无)')))}</code>")
-        parts.append(f"   📦 Subnet: <code>{html.escape(str(safe_get(subnet, 'display_name')))}</code>")
+        parts.append(f"\n<b>🌐 网卡 #{idx}: {html.escape(str(safe_get(vnic, 'display_name')))}</b>")
+        parts.append(f"🆔 网卡 OCID: <code>{html.escape(str(safe_get(vnic, 'id')))}</code>")
+        parts.append(f"🔒 内网 IP: <code>{html.escape(str(safe_get(vnic, 'private_ip')))}</code>")
+        parts.append(f"🌍 公网 IP: <code>{html.escape(str(safe_get(vnic, 'public_ip', default='(无)')))}</code>")
+        parts.append(f"📦 子网: <b>{html.escape(str(safe_get(subnet, 'display_name')))}</b>")
+        parts.append(f"🆔 子网 OCID: <code>{html.escape(str(safe_get(subnet, 'id')))}</code>")
+        parts.append(f"🕸️ VCN OCID: <code>{html.escape(str(safe_get(subnet, 'vcn_id')))}</code>")
         if nsgs:
+            parts.append("🛡️ NSG:")
             for nsg in nsgs:
-                parts.append(f"   🛡️ NSG: <code>{html.escape(str(safe_get(nsg, 'display_name')))}</code>")
+                parts.append(f"  • <b>{html.escape(str(safe_get(nsg, 'display_name')))}</b>")
+                parts.append(f"    <code>{html.escape(str(safe_get(nsg, 'id')))}</code>")
         else:
-            parts.append("   🛡️ NSG: <i>(无)</i>")
+            parts.append("🛡️ NSG: <i>(无)</i>")
         if security_lists:
+            parts.append("📋 安全列表:")
             for sl in security_lists:
-                parts.append(f"   📋 SL: <code>{html.escape(str(safe_get(sl, 'display_name')))}</code>")
+                parts.append(f"  • <b>{html.escape(str(safe_get(sl, 'display_name')))}</b>")
+                parts.append(f"    <code>{html.escape(str(safe_get(sl, 'id')))}</code>")
         else:
-            parts.append("   📋 SL: <i>(无)</i>")
+            parts.append("📋 安全列表: <i>(无)</i>")
+        parts.append("─────────────────────")
     return "\n".join(parts)
 
-
-def render_nsg_rules_telegram(nsg: Any, rules: List[Any]) -> str:
-    parts = [
-        "<b>🛡️ NSG 规则</b>",
-        f"名称: <b>{html.escape(str(safe_get(nsg, 'display_name')))}</b>",
-        f"OCID: <code>{html.escape(str(safe_get(nsg, 'id')))}</code>",
-        f"规则数: <code>{len(rules)}</code>",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-    ]
-    if not rules:
-        parts.append("📭 <i>无 NSG 规则</i>")
-        return "\n".join(parts)
-    for idx, rule in enumerate(rules, 1):
-        parts.append(f"\n{idx}. <b>{html.escape(str(safe_get(rule, 'direction')))}</b>")
-        parts.append(f"   <code>{html.escape(_format_rule_target(rule))}</code>")
-    return "\n".join(parts)
 
 
 def render_security_list_rules_telegram(security_list: Any) -> str:
     ingress = getattr(security_list, "ingress_security_rules", []) or []
     egress = getattr(security_list, "egress_security_rules", []) or []
     parts = [
-        "<b>📋 Security List 规则</b>",
-        f"名称: <b>{html.escape(str(safe_get(security_list, 'display_name')))}</b>",
-        f"OCID: <code>{html.escape(str(safe_get(security_list, 'id')))}</code>",
-        f"Ingress: <code>{len(ingress)}</code> | Egress: <code>{len(egress)}</code>",
+        "<b>━━━ 📋 Security List 规则 ━━━</b>",
+        f"🏷️ 名称: <b>{html.escape(str(safe_get(security_list, 'display_name')))}</b>",
+        f"🆔 OCID: <code>{html.escape(str(safe_get(security_list, 'id')))}</code>",
+        f"📥 入站: <code>{len(ingress)}</code>    📤 出站: <code>{len(egress)}</code>",
         "━━━━━━━━━━━━━━━━━━━━━━",
     ]
     if ingress:
-        parts.append("\n<b>Ingress</b>")
+        parts.append("<b>📥 入站规则</b>")
         for idx, rule in enumerate(ingress, 1):
-            parts.append(f"{idx}. <code>{html.escape(_format_rule_target(rule))}</code>")
+            rp = _format_rule_parts(rule)
+            parts.append(
+                f"{idx}. <code>{html.escape(rp['protocol'])} {html.escape(rp['ports'])}</code> · <code>{html.escape(rp['peer_display'])}</code>"
+            )
+            if rp['stateless'] != 'False' or rp['desc'] != '-':
+                parts.append(
+                    f"   <code>无状态={html.escape(rp['stateless'])}</code>  <code>描述={html.escape(rp['desc'])}</code>"
+                )
     if egress:
-        parts.append("\n<b>Egress</b>")
+        parts.append("\n<b>📤 出站规则</b>")
         for idx, rule in enumerate(egress, 1):
-            parts.append(f"{idx}. <code>{html.escape(_format_rule_target(rule))}</code>")
+            rp = _format_rule_parts(rule)
+            parts.append(
+                f"{idx}. <code>{html.escape(rp['protocol'])} {html.escape(rp['ports'])}</code> · <code>{html.escape(rp['peer_display'])}</code>"
+            )
+            if rp['stateless'] != 'False' or rp['desc'] != '-':
+                parts.append(
+                    f"   <code>无状态={html.escape(rp['stateless'])}</code>  <code>描述={html.escape(rp['desc'])}</code>"
+                )
     if not ingress and not egress:
         parts.append("📭 <i>无 Security List 规则</i>")
+    return "\n".join(parts)
+
+
+def _list_instances(config: Dict[str, Any]) -> List[Any]:
+    compute_client = _get_compute_client(config)
+    return list(oci.pagination.list_call_get_all_results(
+        compute_client.list_instances,
+        compartment_id=config["tenancy"]
+    ).data or [])
+
+
+def _list_security_list_candidates(config: Dict[str, Any]) -> List[Any]:
+    items = []
+    for inst in _list_instances(config):
+        try:
+            topo = _fetch_instance_network_topology(config, safe_get(inst, "id"))
+            for entry in topo["vnics"]:
+                for sl in entry["security_lists"]:
+                    items.append((safe_get(inst, "display_name"), sl))
+        except Exception:
+            continue
+    uniq = {}
+    for inst_name, sl in items:
+        uniq[safe_get(sl, "id")] = (inst_name, sl)
+    return list(uniq.values())
+
+
+def render_instance_candidates_telegram(instances: List[Any]) -> str:
+    if not instances:
+        return "📭 <b>未找到可用实例</b>"
+    parts = [
+        "<b>━━━ 🧱 可用实例列表 ━━━</b>",
+        "💡 直接发送：<code>/instance_network &lt;instance_ocid&gt;</code>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    for idx, inst in enumerate(instances[:20], 1):
+        parts.append(f"\n<b>{idx}. {html.escape(str(safe_get(inst, 'display_name')))}</b>")
+        parts.append(f"🧾 状态: <code>{html.escape(_translate_lifecycle_state(safe_get(inst, 'lifecycle_state')))}</code>")
+        parts.append(f"🆔 OCID: <code>{html.escape(str(safe_get(inst, 'id')))}</code>")
+    return "\n".join(parts)
+
+
+def render_security_list_candidates_telegram(candidates: List[Any]) -> str:
+    if not candidates:
+        return "📭 <b>未找到可用 Security List</b>"
+    parts = [
+        "<b>━━━ 📋 可用 Security List 列表 ━━━</b>",
+        "💡 直接发送：<code>/sl_rules &lt;security_list_ocid&gt;</code>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    for idx, (inst_name, sl) in enumerate(candidates[:20], 1):
+        parts.append(f"\n<b>{idx}. {html.escape(str(safe_get(sl, 'display_name')))}</b>")
+        parts.append(f"🧱 实例: <code>{html.escape(str(inst_name))}</code>")
+        parts.append(f"🆔 OCID: <code>{html.escape(str(safe_get(sl, 'id')))}</code>")
     return "\n".join(parts)
 
 
@@ -1539,37 +1868,6 @@ def show_instance_network(app_config: Optional[Dict[str, Any]] = None, instance_
         LOGGER.exception("查询实例网络安全总览失败")
         print(f"❌ 查询失败: {e}")
 
-
-def show_nsg_rules(app_config: Optional[Dict[str, Any]] = None, nsg_id: Optional[str] = None) -> None:
-    print("\n" + "=" * 80)
-    print("🛡️ 正在获取 NSG 规则...")
-    if not nsg_id:
-        print("❌ 缺少 nsg_id")
-        return
-    try:
-        app_config = app_config or load_app_config()
-        config = get_oci_config(app_config)
-        nsg, rules = _fetch_nsg_rules(config, nsg_id)
-        _print_nsg_rules(nsg, rules)
-    except Exception as e:
-        LOGGER.exception("查询 NSG 规则失败")
-        print(f"❌ 查询失败: {e}")
-
-
-def show_security_list_rules(app_config: Optional[Dict[str, Any]] = None, security_list_id: Optional[str] = None) -> None:
-    print("\n" + "=" * 80)
-    print("📋 正在获取 Security List 规则...")
-    if not security_list_id:
-        print("❌ 缺少 security_list_id")
-        return
-    try:
-        app_config = app_config or load_app_config()
-        config = get_oci_config(app_config)
-        security_list = _fetch_security_list(config, security_list_id)
-        _print_security_list_rules(security_list)
-    except Exception as e:
-        LOGGER.exception("查询 Security List 规则失败")
-        print(f"❌ 查询失败: {e}")
 
 
 def create_safe_policy(app_config: Optional[Dict[str, Any]] = None, auto_approve: bool = False) -> None:
@@ -1704,6 +2002,9 @@ def delete_policy(
 # 4. Telegram Bot 集成
 # ==========================================
 class TelegramBotRunner:
+    MENU_SESSION_FILE = os.path.join(BASE_DIR, ".telegram_menu_sessions.json")
+    MENU_SESSION_TTL_SECONDS = 3600
+
     def __init__(self, app_config: Dict[str, Any]):
         self.app_config = app_config
         self.telegram_config = app_config.get("telegram", {})
@@ -1715,6 +2016,52 @@ class TelegramBotRunner:
         self.api_base = f"https://api.telegram.org/bot{self.bot_token}" if self.bot_token else ""
         self.last_update_id = int(self.telegram_config.get("initial_update_offset", 0))
         self.session = create_requests_session()
+        self.menu_sessions = self._load_menu_sessions()
+
+    def _load_menu_sessions(self) -> Dict[str, Any]:
+        try:
+            if os.path.exists(self.MENU_SESSION_FILE):
+                with open(self.MENU_SESSION_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data if isinstance(data, dict) else {}
+        except Exception:
+            LOGGER.exception("加载 Telegram 菜单会话失败")
+        return {}
+
+    def _save_menu_sessions(self) -> None:
+        try:
+            self._purge_menu_sessions()
+            with open(self.MENU_SESSION_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.menu_sessions, f, ensure_ascii=False, indent=2)
+        except Exception:
+            LOGGER.exception("保存 Telegram 菜单会话失败")
+
+    def _purge_menu_sessions(self) -> None:
+        now = int(time.time())
+        expired = []
+        for key, value in self.menu_sessions.items():
+            ts = int((value or {}).get("updated_at", 0) or 0)
+            if ts and now - ts > self.MENU_SESSION_TTL_SECONDS:
+                expired.append(key)
+        for key in expired:
+            self.menu_sessions.pop(key, None)
+
+    def _menu_key(self, chat_id: str, user_id: str) -> str:
+        return f"{chat_id}:{user_id}"
+
+    def _get_menu_state(self, chat_id: str, user_id: str) -> Dict[str, Any]:
+        self._purge_menu_sessions()
+        return self.menu_sessions.get(self._menu_key(chat_id, user_id), {})
+
+    def _set_menu_state(self, chat_id: str, user_id: str, state: Dict[str, Any]) -> None:
+        state = dict(state or {})
+        state["updated_at"] = int(time.time())
+        self.menu_sessions[self._menu_key(chat_id, user_id)] = state
+        self._save_menu_sessions()
+
+    def _clear_menu_state(self, chat_id: str, user_id: str) -> None:
+        self.menu_sessions.pop(self._menu_key(chat_id, user_id), None)
+        self._save_menu_sessions()
 
     def validate(self) -> None:
         if not self.enabled:
@@ -1805,8 +2152,7 @@ class TelegramBotRunner:
             {"command": "policies", "description": "查询密码策略看板"},
             {"command": "audit_events", "description": "查询审计事件日志"},
             {"command": "instance_network", "description": "查询实例网络安全总览"},
-            {"command": "nsg_rules", "description": "查询 NSG 规则"},
-            {"command": "sl_rules", "description": "查询 Security List 规则"},
+            {"command": "sl_menu", "description": "安全列表菜单式管理"},
             {"command": "create_safe_policy", "description": "创建永不过期安全策略"},
             {"command": "delete_policy", "description": "删除指定密码策略"},
         ]
@@ -1841,8 +2187,7 @@ class TelegramBotRunner:
             "🛡️ /policies - 密码策略看板\n"
             "📋 /audit_events - 审计事件日志\n"
             "🧱 /instance_network &lt;instance_ocid&gt; - 实例网络安全总览\n"
-            "🛡️ /nsg_rules &lt;nsg_ocid&gt; - NSG 规则\n"
-            "📋 /sl_rules &lt;security_list_ocid&gt; - Security List 规则\n\n"
+            "🧭 /sl_menu - 安全列表菜单式管理\n\n"
             "<b>⚙️ 管理命令</b>\n"
             "🔒 /create_safe_policy - 创建永不过期策略\n"
             "🗑️ /delete_policy &lt;名称&gt; - 删除指定策略\n\n"
@@ -1858,11 +2203,316 @@ class TelegramBotRunner:
             return build_inline_keyboard([[{"text": "收起历史数据", "callback_data": "usage_fee:collapse"}]])
         return build_inline_keyboard([[{"text": "展开全部历史数据", "callback_data": "usage_fee:expand"}]])
 
+    def build_sl_root_keyboard(self) -> Dict[str, Any]:
+        return build_inline_keyboard([
+            [{"text": "📝 查看安全列表", "callback_data": "slm:start:view"}],
+            [{"text": "⬇️ 新增入站", "callback_data": "slm:start:add_ingress"}, {"text": "⬆️ 新增出站", "callback_data": "slm:start:add_egress"}],
+            [{"text": "🚫 删除入站", "callback_data": "slm:start:delete_ingress"}, {"text": "❌ 删除出站", "callback_data": "slm:start:delete_egress"}],
+            [{"text": "🔁 替换入站", "callback_data": "slm:start:replace_ingress"}, {"text": "♻️ 替换出站", "callback_data": "slm:start:replace_egress"}],
+        ])
+
+    def _sl_action_label(self, action: Optional[str]) -> str:
+        action_map = {
+            "view": "查看安全列表规则",
+            "add_ingress": "新增入站规则",
+            "add_egress": "新增出站规则",
+            "delete_ingress": "删除入站规则",
+            "delete_egress": "删除出站规则",
+            "replace_ingress": "替换入站规则",
+            "replace_egress": "替换出站规则",
+        }
+        return action_map.get(action or "view", "安全列表操作")
+
+    def _ensure_sl_tokens(self, state: Dict[str, Any]) -> Dict[str, str]:
+        tokens = dict(state.get("tokens") or {})
+        state["tokens"] = tokens
+        return tokens
+
+    def _register_sl_token(self, state: Dict[str, Any], prefix: str, value: str) -> str:
+        tokens = self._ensure_sl_tokens(state)
+        for token, token_value in tokens.items():
+            if token.startswith(prefix) and token_value == value:
+                return token
+        existing = [token for token in tokens if token.startswith(prefix)]
+        token = f"{prefix}{len(existing) + 1}"
+        tokens[token] = value
+        return token
+
+    def _resolve_sl_token(self, state: Dict[str, Any], token: str) -> str:
+        tokens = self._ensure_sl_tokens(state)
+        return str(tokens.get(token, token))
+
+    def _parse_cidr_input(self, cidr_text: str) -> Tuple[bool, Optional[str], Optional[str]]:
+        """解析 CIDR 输入，返回: (是否合法, 解析后的CIDR, 错误消息)"""
+        cidr_text = cidr_text.strip()
+        
+        # 尝试解析 IPv4
+        try:
+            ipaddress.IPv4Network(cidr_text, strict=False)
+            return (True, cidr_text, None)
+        except (ipaddress.AddressValueError, ValueError):
+            pass
+        
+        # 尝试解析 IPv6
+        try:
+            ipaddress.IPv6Network(cidr_text, strict=False)
+            return (True, cidr_text, None)
+        except (ipaddress.AddressValueError, ValueError):
+            pass
+        
+        error_msg = (
+            f"❌ 无效的 CIDR 格式: <code>{html.escape(cidr_text)}</code>\n\n"
+            "请输入合法的 IPv4 或 IPv6 CIDR，例如：\n"
+            "• <code>0.0.0.0/0</code>\n"
+            "• <code>192.168.1.0/24</code>\n"
+            "• <code>::/0</code>\n"
+            "• <code>2001:db8::/32</code>"
+        )
+        return (False, None, error_msg)
+
+    def _parse_port_input(self, port_text: str) -> Tuple[bool, Optional[int], Optional[int], Optional[str]]:
+        """解析端口输入，返回: (是否合法, port_min, port_max, 错误消息)"""
+        port_text = port_text.strip()
+        
+        # 范围格式: 25000-25100
+        if "-" in port_text:
+            parts = port_text.split("-", 1)
+            if len(parts) != 2:
+                return (False, None, None, "❌ 端口范围格式错误，应为: <code>起始端口-结束端口</code>")
+            
+            try:
+                port_min = int(parts[0].strip())
+                port_max = int(parts[1].strip())
+            except ValueError:
+                return (False, None, None, "❌ 端口必须是数字")
+            
+            if port_min < 1 or port_min > 65535:
+                return (False, None, None, f"❌ 起始端口 {port_min} 超出范围 (1-65535)")
+            if port_max < 1 or port_max > 65535:
+                return (False, None, None, f"❌ 结束端口 {port_max} 超出范围 (1-65535)")
+            if port_min > port_max:
+                return (False, None, None, f"❌ 起始端口 {port_min} 不能大于结束端口 {port_max}")
+            
+            return (True, port_min, port_max, None)
+        
+        # 单端口格式: 22
+        try:
+            port = int(port_text)
+        except ValueError:
+            return (False, None, None, "❌ 端口必须是数字或范围格式 (如 <code>22</code> 或 <code>25000-25100</code>)")
+        
+        if port < 1 or port > 65535:
+            return (False, None, None, f"❌ 端口 {port} 超出范围 (1-65535)")
+        
+        return (True, port, port, None)
+
+    def _protocol_needs_port(self, protocol: str) -> bool:
+        """判断协议是否需要端口"""
+        return protocol not in {"1", "58", "all"}
+
+    def _build_cidr_quick_keyboard(self, action: str, show_back: bool = False) -> Dict[str, Any]:
+        direction = "来源" if action.endswith("ingress") else "目标"
+        rows = [
+            [{"text": "0.0.0.0/0", "callback_data": "slm:cidr:p1"}, {"text": "::/0", "callback_data": "slm:cidr:p2"}],
+            [{"text": "10.0.0.0/8", "callback_data": "slm:cidr:p3"}, {"text": "192.168.0.0/16", "callback_data": "slm:cidr:p4"}],
+            [{"text": f"✍️ 自定义{direction}CIDR", "callback_data": "slm:cidr:custom"}],
+        ]
+        if show_back:
+            rows.append([{"text": "⬅️ 返回上一步", "callback_data": "slm:back:protocol"}, {"text": "🏠 主菜单", "callback_data": "slm:home"}])
+        else:
+            rows.append([{"text": "🏠 主菜单", "callback_data": "slm:home"}])
+        return build_inline_keyboard(rows)
+
+    def _build_port_quick_keyboard(self, show_back: bool = False) -> Dict[str, Any]:
+        rows = [
+            [{"text": "22", "callback_data": "slm:port:p1"}, {"text": "80", "callback_data": "slm:port:p2"}, {"text": "443", "callback_data": "slm:port:p3"}],
+            [{"text": "25000-25100", "callback_data": "slm:port:p4"}],
+            [{"text": "✍️ 自定义端口", "callback_data": "slm:port:custom"}],
+        ]
+        if show_back:
+            rows.append([{"text": "⬅️ 返回上一步", "callback_data": "slm:back:cidr"}, {"text": "🏠 主菜单", "callback_data": "slm:home"}])
+        else:
+            rows.append([{"text": "🏠 主菜单", "callback_data": "slm:home"}])
+        return build_inline_keyboard(rows)
+
+    def _render_instance_picker_page(self, state: Dict[str, Any], page: int = 1, action: Optional[str] = None) -> Tuple[str, Dict[str, Any]]:
+        app_config = self.app_config or load_app_config()
+        config = get_oci_config(app_config)
+        instances = _list_instances(config)
+        page_size = 8
+        total_pages = max(1, math.ceil(len(instances) / page_size))
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * page_size
+        current = instances[start:start + page_size]
+        lines = ["<b>🧱 选择实例</b>", f"当前操作：{html.escape(self._sl_action_label(action))}", f"页码：<code>{page}/{total_pages}</code>", "━━━━━━━━━━━━━━━━━━━━━━"]
+        rows: List[List[Dict[str, str]]] = []
+        for inst in current:
+            inst_id = str(safe_get(inst, "id"))
+            inst_name = str(safe_get(inst, "display_name"))
+            state_name = _translate_lifecycle_state(safe_get(inst, "lifecycle_state"))
+            inst_token = self._register_sl_token(state, "i", inst_id)
+            lines.append(f"• <b>{html.escape(inst_name)}</b> · <code>{html.escape(state_name)}</code>")
+            lines.append(f"  <code>{html.escape(inst_id)}</code>")
+            rows.append([{"text": f"{inst_name[:18]} · {state_name}", "callback_data": f"slm:inst:{action or 'view'}:{inst_token}"}])
+        nav = []
+        if page > 1:
+            nav.append({"text": "⬅️ 上一页", "callback_data": f"slm:instances:{page - 1}:{action or 'view'}"})
+        if page < total_pages:
+            nav.append({"text": "下一页 ➡️", "callback_data": f"slm:instances:{page + 1}:{action or 'view'}"})
+        if nav:
+            rows.append(nav)
+        rows.append([{"text": "🏠 返回主菜单", "callback_data": "slm:home"}])
+        return "\n".join(lines), build_inline_keyboard(rows)
+
+    def _get_instance_security_list_candidates(self, instance_id: str) -> Tuple[Any, List[Any]]:
+        app_config = self.app_config or load_app_config()
+        config = get_oci_config(app_config)
+        topo = _fetch_instance_network_topology(config, instance_id)
+        candidates = []
+        seen = set()
+        for entry in topo["vnics"]:
+            for sl in entry["security_lists"]:
+                sl_id = safe_get(sl, "id")
+                if sl_id in seen:
+                    continue
+                seen.add(sl_id)
+                candidates.append(sl)
+        return topo["instance"], candidates
+
+    def _render_instance_security_list_page(self, state: Dict[str, Any], instance_id: str, action: Optional[str]) -> Tuple[str, Dict[str, Any]]:
+        inst, candidates = self._get_instance_security_list_candidates(instance_id)
+        inst_name = str(safe_get(inst, "display_name"))
+        lines = ["<b>📋 选择安全列表</b>", f"实例：<b>{html.escape(inst_name)}</b>", f"当前操作：{html.escape(self._sl_action_label(action))}", "━━━━━━━━━━━━━━━━━━━━━━"]
+        rows: List[List[Dict[str, str]]] = []
+        instance_token = self._register_sl_token(state, "i", instance_id)
+        if not candidates:
+            lines.append("该实例未关联任何安全列表。")
+        for sl in candidates:
+            sl_id = str(safe_get(sl, "id"))
+            display_name = str(safe_get(sl, "display_name"))
+            sl_token = self._register_sl_token(state, "s", sl_id)
+            lines.append(f"• <b>{html.escape(display_name)}</b>")
+            lines.append(f"  <code>{html.escape(sl_id)}</code>")
+            # 按钮文本：如果名称包含 Default，翻译为中文
+            button_text = display_name
+            if "Default" in display_name:
+                button_text = display_name.replace("Default Security List for", "默认安全列表")
+            if len(button_text) > 24:
+                button_text = button_text[:21] + "..."
+            rows.append([{"text": button_text, "callback_data": f"slm:pick:{action or 'view'}:{instance_token}:{sl_token}"}])
+        rows.append([{"text": "⬅️ 返回实例列表", "callback_data": f"slm:instances:1:{action or 'view'}"}, {"text": "🏠 主菜单", "callback_data": "slm:home"}])
+        return "\n".join(lines), build_inline_keyboard(rows)
+
+    def _render_sl_action_menu(self, state: Dict[str, Any], instance_id: str, sl_id: str, action: str) -> Tuple[str, Dict[str, Any]]:
+        security_list = _fetch_security_list(get_oci_config(self.app_config or load_app_config()), sl_id)
+        inst, _ = self._get_instance_security_list_candidates(instance_id)
+        title_map = {
+            "view": "📋 安全列表规则",
+            "add_ingress": "➕ 新增安全列表入站规则",
+            "add_egress": "➕ 新增安全列表出站规则",
+            "delete_ingress": "➖ 删除安全列表入站规则",
+            "delete_egress": "➖ 删除安全列表出站规则",
+            "replace_ingress": "✏️ 替换安全列表入站规则",
+            "replace_egress": "✏️ 替换安全列表出站规则",
+        }
+        text = [
+            f"<b>{title_map.get(action, '安全列表操作')}</b>",
+            f"实例：<b>{html.escape(str(safe_get(inst, 'display_name')))}</b>",
+            f"名称：<b>{html.escape(str(safe_get(security_list, 'display_name')))}</b>",
+            f"OCID：<code>{html.escape(sl_id)}</code>",
+        ]
+        keyboard_rows: List[List[Dict[str, str]]] = []
+        if action == "view":
+            return render_security_list_rules_telegram(security_list), build_inline_keyboard([[{"text": "⬅️ 返回安全列表", "callback_data": f"slm:inst:{action}:{self._register_sl_token(state, 'i', instance_id)}"}, {"text": "🏠 主菜单", "callback_data": "slm:home"}]])
+        sl_token = self._register_sl_token(state, "s", sl_id)
+        if action.startswith("add_"):
+            text += ["请选择协议："]
+            keyboard_rows += [
+                [{"text": "TCP (传输控制)", "callback_data": f"slm:protocol:{action}:{sl_token}:6"}, {"text": "UDP (用户数据报)", "callback_data": f"slm:protocol:{action}:{sl_token}:17"}],
+                [{"text": "ICMP (网络控制)", "callback_data": f"slm:protocol:{action}:{sl_token}:1"}, {"text": "ALL (所有协议)", "callback_data": f"slm:protocol:{action}:{sl_token}:all"}],
+            ]
+        else:
+            rules = list(getattr(security_list, "ingress_security_rules" if action.endswith("ingress") else "egress_security_rules", []) or [])
+            text.append("请选择要操作的规则：")
+            for idx, rule in enumerate(rules, 1):
+                label = _format_rule_target(rule)
+                if len(label) > 40:
+                    label = label[:37] + "..."
+                rule_token = self._register_sl_token(state, "r", str(idx))
+                keyboard_rows.append([{"text": f"{idx}. {label}", "callback_data": f"slm:rule:{action}:{rule_token}"}])
+                text.append(f"{idx}. <code>{html.escape(_format_rule_target(rule))}</code>")
+        # 使用 instance token 而非 OCID
+        instance_token = self._register_sl_token(state, "i", instance_id)
+        keyboard_rows.append([{"text": "⬅️ 返回安全列表", "callback_data": f"slm:inst:{action}:{instance_token}"}, {"text": "🏠 主菜单", "callback_data": "slm:home"}])
+        return "\n".join(text), build_inline_keyboard(keyboard_rows)
+
+    def _execute_sl_menu_action(self, state: Dict[str, Any]) -> str:
+        action = state.get("action")
+        sl_id = state.get("sl_id")
+        protocol = state.get("protocol")
+        cidr = state.get("cidr")
+        port_min = state.get("port_min")
+        port_max = state.get("port_max")
+        description = state.get("description")
+        rule_index = state.get("rule_index")
+        if action == "add_ingress":
+            return capture_output(add_security_list_ingress_rule, self.app_config, sl_id, cidr, protocol, port_min, port_max, description, False, True)
+        if action == "add_egress":
+            return capture_output(add_security_list_egress_rule, self.app_config, sl_id, cidr, protocol, port_min, port_max, description, False, True)
+        if action == "delete_ingress":
+            return capture_output(remove_security_list_ingress_rule, self.app_config, sl_id, rule_index, True)
+        if action == "delete_egress":
+            return capture_output(remove_security_list_egress_rule, self.app_config, sl_id, rule_index, True)
+        if action == "replace_ingress":
+            return capture_output(replace_security_list_ingress_rule, self.app_config, sl_id, rule_index, cidr, protocol, port_min, port_max, description, False, True)
+        if action == "replace_egress":
+            return capture_output(replace_security_list_egress_rule, self.app_config, sl_id, rule_index, cidr, protocol, port_min, port_max, description, False, True)
+        return "❌ 未知操作。"
+
+    def _build_sl_apply_preview(self, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        action = state.get("action")
+        sl_id = state.get("sl_id")
+        protocol = state.get("protocol")
+        protocol_name = _protocol_name(protocol)
+        cidr = state.get("cidr")
+        port_min = state.get("port_min")
+        port_max = state.get("port_max")
+        description = state.get("description") or "-"
+        rule_index = state.get("rule_index")
+        port_text = "all" if port_min is None else (str(port_min) if port_min == port_max or port_max is None else f"{port_min}-{port_max}")
+        title_map = {
+            "add_ingress": "➕ 安全列表入站规则预览",
+            "add_egress": "➕ 安全列表出站规则预览",
+            "replace_ingress": "✏️ 安全列表入站规则预览",
+            "replace_egress": "✏️ 安全列表出站规则预览",
+        }
+        lines = [
+            f"<b>{title_map.get(action, '安全列表操作预览')}</b>",
+            f"安全列表：<code>{html.escape(str(sl_id))}</code>",
+            f"协议：<code>{html.escape(protocol_name)}</code>",
+            f"CIDR：<code>{html.escape(str(cidr))}</code>",
+            f"端口：<code>{html.escape(port_text)}</code>",
+            f"描述：<code>{html.escape(str(description))}</code>",
+        ]
+        if rule_index is not None:
+            lines.insert(2, f"规则序号：<code>{rule_index}</code>")
+        
+        # 确定返回目标：如果协议需要端口，返回描述页；否则返回 CIDR 页
+        back_target = "port" if self._protocol_needs_port(protocol) else "cidr"
+        
+        kb = build_inline_keyboard([
+            [{"text": "✅ 确认提交", "callback_data": "slm:apply"}, {"text": "❌ 取消", "callback_data": "slm:cancel"}],
+            [{"text": "⬅️ 返回上一步", "callback_data": f"slm:back:{back_target}"}, {"text": "🏠 主菜单", "callback_data": "slm:home"}],
+        ])
+        return "\n".join(lines), kb
+
     def handle_command(self, text: str) -> str:
         normalized = (text or "").strip()
         if not normalized:
             return "未收到命令内容。"
 
+        if normalized.startswith("/sl_menu"):
+            return "<b>🧭 安全列表管理菜单</b>\n请选择要执行的操作："
         if normalized.startswith("/start"):
             return "欢迎使用 OCI Master Telegram Bot。\n" + self.build_help_text()
         if normalized.startswith("/help") or normalized.startswith("/menu"):
@@ -1926,38 +2576,14 @@ class TelegramBotRunner:
         if normalized.startswith("/instance_network"):
             try:
                 parts = normalized.split(maxsplit=1)
-                if len(parts) < 2:
-                    return "请提供实例 OCID，例如：/instance_network ocid1.instance.oc1..."
                 app_config = self.app_config or load_app_config()
                 config = get_oci_config(app_config)
+                if len(parts) < 2:
+                    return render_instance_candidates_telegram(_list_instances(config))
                 topology = _fetch_instance_network_topology(config, parts[1].strip())
                 return render_instance_network_telegram(topology)
             except Exception as e:
                 LOGGER.exception("查询实例网络安全总览失败")
-                return f"❌ 查询失败: {str(e)[:200]}"
-        if normalized.startswith("/nsg_rules"):
-            try:
-                parts = normalized.split(maxsplit=1)
-                if len(parts) < 2:
-                    return "请提供 NSG OCID，例如：/nsg_rules ocid1.networksecuritygroup.oc1..."
-                app_config = self.app_config or load_app_config()
-                config = get_oci_config(app_config)
-                nsg, rules = _fetch_nsg_rules(config, parts[1].strip())
-                return render_nsg_rules_telegram(nsg, rules)
-            except Exception as e:
-                LOGGER.exception("查询 NSG 规则失败")
-                return f"❌ 查询失败: {str(e)[:200]}"
-        if normalized.startswith("/sl_rules"):
-            try:
-                parts = normalized.split(maxsplit=1)
-                if len(parts) < 2:
-                    return "请提供 Security List OCID，例如：/sl_rules ocid1.securitylist.oc1..."
-                app_config = self.app_config or load_app_config()
-                config = get_oci_config(app_config)
-                security_list = _fetch_security_list(config, parts[1].strip())
-                return render_security_list_rules_telegram(security_list)
-            except Exception as e:
-                LOGGER.exception("查询 Security List 规则失败")
                 return f"❌ 查询失败: {str(e)[:200]}"
         if normalized.startswith("/create_safe_policy"):
             return capture_output(create_safe_policy, self.app_config, True)
@@ -1992,10 +2618,7 @@ class TelegramBotRunner:
             return capture_output(list_audit_events, self.app_config, limit)
         if action.startswith("instance_network:"):
             return capture_output(show_instance_network, self.app_config, action.split(":", 1)[1].strip())
-        if action.startswith("nsg_rules:"):
-            return capture_output(show_nsg_rules, self.app_config, action.split(":", 1)[1].strip())
-        if action.startswith("sl_rules:"):
-            return capture_output(show_security_list_rules, self.app_config, action.split(":", 1)[1].strip())
+
         if action == "create_safe_policy":
             return capture_output(create_safe_policy, self.app_config, True)
         if action.startswith("delete_policy:"):
@@ -2003,7 +2626,7 @@ class TelegramBotRunner:
             if not policy_name:
                 return "delete_policy 动作必须附带策略名，例如 delete_policy:NeverExpireStandard"
             return capture_output(delete_policy, self.app_config, policy_name, True)
-        return "未知 action，可选: user_info, usage_fee, policies, audit_events[:N], instance_network:<OCID>, nsg_rules:<OCID>, sl_rules:<OCID>, create_safe_policy, delete_policy:<名称>"
+        return "未知 action，可选: user_info, usage_fee, policies, audit_events[:N], instance_network:<OCID>, create_safe_policy, delete_policy:<名称>"
 
     def handle_callback_query(self, callback_query: Dict[str, Any]) -> None:
         callback_query_id = str(callback_query.get("id", ""))
@@ -2013,6 +2636,7 @@ class TelegramBotRunner:
         chat_id = str(chat.get("id", ""))
         message_id = int(message.get("message_id", 0) or 0)
         from_user = callback_query.get("from") or {}
+        user_id = str(from_user.get("id", ""))
 
         pseudo_message = {
             "chat": chat,
@@ -2023,23 +2647,229 @@ class TelegramBotRunner:
             self.answer_callback_query(callback_query_id, "未授权操作")
             return
 
-        if data not in {"usage_fee:expand", "usage_fee:collapse"}:
-            self.answer_callback_query(callback_query_id, "未知操作")
+        if data.startswith("usage_fee:"):
+            report_data = get_usage_fee_report_data(self.app_config)
+            show_all = data == "usage_fee:expand"
+            text = render_usage_fee_telegram(report_data, show_all=show_all)
+            keyboard = self.build_usage_fee_keyboard(show_all, len(report_data["unique_dates"]), report_data["display_days"])
+            self.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+            self.answer_callback_query(callback_query_id, "已更新显示内容")
             return
 
-        report_data = get_usage_fee_report_data(self.app_config)
-        show_all = data == "usage_fee:expand"
-        text = render_usage_fee_telegram(report_data, show_all=show_all)
-        keyboard = self.build_usage_fee_keyboard(show_all, len(report_data["unique_dates"]), report_data["display_days"])
+        if data == "slm:home":
+            self._clear_menu_state(chat_id, user_id)
+            self.edit_message_text(chat_id=chat_id, message_id=message_id, text="<b>🧭 安全列表管理菜单</b>\n请选择要执行的操作：", parse_mode="HTML", reply_markup=self.build_sl_root_keyboard())
+            self.answer_callback_query(callback_query_id, "已返回主菜单")
+            return
 
-        self.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=text,
-            parse_mode="HTML",
-            reply_markup=keyboard,
-        )
-        self.answer_callback_query(callback_query_id, "已更新显示内容")
+        if data.startswith("slm:instances:"):
+            parts = data.split(":", 3)
+            page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
+            action = parts[3] if len(parts) > 3 and parts[3] else "view"
+            state = self._get_menu_state(chat_id, user_id)
+            # 先保存 state
+            self._set_menu_state(chat_id, user_id, state)
+            text, keyboard = self._render_instance_picker_page(state, page, action)
+            # 再次保存
+            self._set_menu_state(chat_id, user_id, state)
+            self.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+            self.answer_callback_query(callback_query_id, "请选择实例")
+            return
+
+        if data.startswith("slm:start:"):
+            action = data.split(":", 2)[2]
+            state = {"action": action}
+            # 先保存新 state
+            self._set_menu_state(chat_id, user_id, state)
+            text, keyboard = self._render_instance_picker_page(state, 1, action)
+            # 再次保存，确保 token 映射被保存
+            self._set_menu_state(chat_id, user_id, state)
+            self.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+            self.answer_callback_query(callback_query_id, "请选择实例")
+            return
+
+        if data.startswith("slm:inst:"):
+            _, _, action, instance_token = data.split(":", 3)
+            state = self._get_menu_state(chat_id, user_id)
+            instance_id = self._resolve_sl_token(state, instance_token)
+            state.update({"action": action, "instance_id": instance_id})
+            # 先保存 state
+            self._set_menu_state(chat_id, user_id, state)
+            text, keyboard = self._render_instance_security_list_page(state, instance_id, action)
+            # 再次保存，确保 render 中新注册的 token 被保存
+            self._set_menu_state(chat_id, user_id, state)
+            self.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+            self.answer_callback_query(callback_query_id, "请选择安全列表")
+            return
+
+        if data.startswith("slm:pick:"):
+            _, _, action, instance_token, sl_token = data.split(":", 4)
+            state = self._get_menu_state(chat_id, user_id)
+            instance_id = self._resolve_sl_token(state, instance_token)
+            sl_id = self._resolve_sl_token(state, sl_token)
+            state.update({"action": action, "instance_id": instance_id, "sl_id": sl_id})
+            # 先保存 state，确保 token 映射在 _render_sl_action_menu 中注册时可用
+            self._set_menu_state(chat_id, user_id, state)
+            text, keyboard = self._render_sl_action_menu(state, instance_id, sl_id, action)
+            # 再次保存，确保 _render_sl_action_menu 中新注册的 token 被保存
+            self._set_menu_state(chat_id, user_id, state)
+            self.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+            self.answer_callback_query(callback_query_id, "已选择安全列表")
+            return
+
+        if data.startswith("slm:protocol:"):
+            _, _, action, sl_token, protocol = data.split(":", 4)
+            state = self._get_menu_state(chat_id, user_id)
+            sl_id = self._resolve_sl_token(state, sl_token)
+            state.update({"action": action, "sl_id": sl_id, "protocol": protocol, "awaiting": "cidr"})
+            self._set_menu_state(chat_id, user_id, state)
+            direction = "来源 CIDR" if action.endswith("ingress") else "目标 CIDR"
+            self.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"<b>请选择或输入{direction}</b>\n\n示例：\n• <code>0.0.0.0/0</code> (允许所有 IPv4)\n• <code>192.168.1.0/24</code> (私有网段)\n• <code>::/0</code> (允许所有 IPv6)", parse_mode="HTML", reply_markup=self._build_cidr_quick_keyboard(action, show_back=True))
+            self.answer_callback_query(callback_query_id, "请选择 CIDR")
+            return
+
+        if data.startswith("slm:cidr:"):
+            cidr_token = data.split(":", 2)[2]
+            cidr_map = {"p1": "0.0.0.0/0", "p2": "::/0", "p3": "10.0.0.0/8", "p4": "192.168.0.0/16"}
+            state = self._get_menu_state(chat_id, user_id)
+            if cidr_token == "custom":
+                state["awaiting"] = "cidr"
+                self._set_menu_state(chat_id, user_id, state)
+                direction = "来源 CIDR" if str(state.get("action", "")).endswith("ingress") else "目标 CIDR"
+                self.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"<b>请输入{direction}</b>\n\n示例：\n• <code>0.0.0.0/0</code> (允许所有 IPv4)\n• <code>192.168.1.0/24</code> (私有网段)\n• <code>::/0</code> (允许所有 IPv6)", parse_mode="HTML", reply_markup=build_inline_keyboard([[{"text": "⬅️ 返回上一步", "callback_data": "slm:back:protocol"}, {"text": "🏠 主菜单", "callback_data": "slm:home"}]]))
+                self.answer_callback_query(callback_query_id, "请发送 CIDR")
+                return
+            cidr = cidr_map.get(cidr_token)
+            if not cidr:
+                self.answer_callback_query(callback_query_id, "未知 CIDR 选项")
+                return
+            state["cidr"] = cidr
+            protocol = str(state.get("protocol"))
+            if not self._protocol_needs_port(protocol):
+                state["port_min"] = None
+                state["port_max"] = None
+                state["awaiting"] = "description"
+                self._set_menu_state(chat_id, user_id, state)
+                self.edit_message_text(chat_id=chat_id, message_id=message_id, text="<b>请输入规则描述</b>\n\n可直接发送描述文本\n若留空请发送: <code>-</code>", parse_mode="HTML", reply_markup=build_inline_keyboard([[{"text": "⬅️ 返回上一步", "callback_data": "slm:back:cidr"}, {"text": "🏠 主菜单", "callback_data": "slm:home"}]]))
+                self.answer_callback_query(callback_query_id, "请发送描述")
+                return
+            state["awaiting"] = "port"
+            self._set_menu_state(chat_id, user_id, state)
+            self.edit_message_text(chat_id=chat_id, message_id=message_id, text="<b>请选择或输入端口</b>\n\n支持格式：\n• 单端口: <code>22</code>\n• 范围: <code>25000-25100</code>", parse_mode="HTML", reply_markup=self._build_port_quick_keyboard(show_back=True))
+            self.answer_callback_query(callback_query_id, "请选择端口")
+            return
+
+        if data.startswith("slm:port:"):
+            port_token = data.split(":", 2)[2]
+            port_map = {"p1": (22, 22), "p2": (80, 80), "p3": (443, 443), "p4": (25000, 25100)}
+            state = self._get_menu_state(chat_id, user_id)
+            if port_token == "custom":
+                state["awaiting"] = "port"
+                self._set_menu_state(chat_id, user_id, state)
+                self.edit_message_text(chat_id=chat_id, message_id=message_id, text="<b>请输入端口</b>\n\n支持格式：\n• 单端口: <code>22</code>\n• 范围: <code>25000-25100</code>", parse_mode="HTML", reply_markup=build_inline_keyboard([[{"text": "⬅️ 返回上一步", "callback_data": "slm:back:cidr"}, {"text": "🏠 主菜单", "callback_data": "slm:home"}]]))
+                self.answer_callback_query(callback_query_id, "请发送端口")
+                return
+            port_pair = port_map.get(port_token)
+            if not port_pair:
+                self.answer_callback_query(callback_query_id, "未知端口选项")
+                return
+            state["port_min"], state["port_max"] = port_pair
+            state["awaiting"] = "description"
+            self._set_menu_state(chat_id, user_id, state)
+            self.edit_message_text(chat_id=chat_id, message_id=message_id, text="<b>请输入规则描述</b>\n\n可直接发送描述文本\n若留空请发送: <code>-</code>", parse_mode="HTML", reply_markup=build_inline_keyboard([[{"text": "⬅️ 返回上一步", "callback_data": "slm:back:port"}, {"text": "🏠 主菜单", "callback_data": "slm:home"}]]))
+            self.answer_callback_query(callback_query_id, "请发送描述")
+            return
+
+        if data.startswith("slm:rule:"):
+            _, _, action, rule_token = data.split(":", 3)
+            state = self._get_menu_state(chat_id, user_id)
+            rule_index = int(self._resolve_sl_token(state, rule_token))
+            sl_id = str(state.get("sl_id"))
+            state.update({"action": action, "sl_id": sl_id, "rule_index": rule_index})
+            if action.startswith("delete_"):
+                self._set_menu_state(chat_id, user_id, state)
+                text = [f"<b>{'入站' if action.endswith('ingress') else '出站'}规则删除确认</b>", f"安全列表：<code>{html.escape(sl_id)}</code>", f"规则序号：<code>{rule_index}</code>"]
+                kb = build_inline_keyboard([[{"text": "✅ 确认提交", "callback_data": "slm:apply"}, {"text": "❌ 取消", "callback_data": "slm:cancel"}], [{"text": "🏠 主菜单", "callback_data": "slm:home"}]])
+                self.edit_message_text(chat_id=chat_id, message_id=message_id, text="\n".join(text), parse_mode="HTML", reply_markup=kb)
+                self.answer_callback_query(callback_query_id, "确认后将提交删除")
+                return
+            state["awaiting"] = "protocol"
+            # 先保存基本 state
+            self._set_menu_state(chat_id, user_id, state)
+            sl_token = self._register_sl_token(state, "s", sl_id)
+            # 再次保存，确保 token 映射被保存
+            self._set_menu_state(chat_id, user_id, state)
+            kb = build_inline_keyboard([
+                [{"text": "TCP (传输控制)", "callback_data": f"slm:protocol:{action}:{sl_token}:6"}, {"text": "UDP (用户数据报)", "callback_data": f"slm:protocol:{action}:{sl_token}:17"}],
+                [{"text": "ICMP (网络控制)", "callback_data": f"slm:protocol:{action}:{sl_token}:1"}, {"text": "ALL (所有协议)", "callback_data": f"slm:protocol:{action}:{sl_token}:all"}],
+                [{"text": "🏠 主菜单", "callback_data": "slm:home"}],
+            ])
+            self.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"<b>请选择替换后的协议</b>\n规则序号：<code>{rule_index}</code>", parse_mode="HTML", reply_markup=kb)
+            self.answer_callback_query(callback_query_id, "请选择协议")
+            return
+
+        if data.startswith("slm:back:"):
+            back_target = data.split(":", 2)[2] if ":" in data[9:] else "home"
+            state = self._get_menu_state(chat_id, user_id)
+            action = state.get("action", "")
+            sl_id = state.get("sl_id", "")
+            
+            if back_target == "protocol":
+                # 返回协议选择页
+                state.pop("cidr", None)
+                state["awaiting"] = "protocol"
+                self._set_menu_state(chat_id, user_id, state)
+                sl_token = self._register_sl_token(state, "s", sl_id)
+                kb = build_inline_keyboard([
+                    [{"text": "TCP (传输控制)", "callback_data": f"slm:protocol:{action}:{sl_token}:6"}, {"text": "UDP (用户数据报)", "callback_data": f"slm:protocol:{action}:{sl_token}:17"}],
+                    [{"text": "ICMP (网络控制)", "callback_data": f"slm:protocol:{action}:{sl_token}:1"}, {"text": "ALL (所有协议)", "callback_data": f"slm:protocol:{action}:{sl_token}:all"}],
+                    [{"text": "🏠 主菜单", "callback_data": "slm:home"}],
+                ])
+                self.edit_message_text(chat_id=chat_id, message_id=message_id, text="<b>请选择协议</b>", parse_mode="HTML", reply_markup=kb)
+                self.answer_callback_query(callback_query_id, "已返回")
+                return
+            
+            elif back_target == "cidr":
+                # 返回 CIDR 选择页
+                state.pop("port_min", None)
+                state.pop("port_max", None)
+                state["awaiting"] = "cidr"
+                self._set_menu_state(chat_id, user_id, state)
+                direction = "来源 CIDR" if action.endswith("ingress") else "目标 CIDR"
+                self.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"<b>请选择或输入{direction}</b>\n\n示例：\n• <code>0.0.0.0/0</code> (允许所有 IPv4)\n• <code>192.168.1.0/24</code> (私有网段)\n• <code>::/0</code> (允许所有 IPv6)", parse_mode="HTML", reply_markup=self._build_cidr_quick_keyboard(action, show_back=True))
+                self.answer_callback_query(callback_query_id, "已返回")
+                return
+            
+            elif back_target == "port":
+                # 返回端口选择页
+                state.pop("description", None)
+                state["awaiting"] = "port"
+                self._set_menu_state(chat_id, user_id, state)
+                self.edit_message_text(chat_id=chat_id, message_id=message_id, text="<b>请选择或输入端口</b>\n\n支持格式：\n• 单端口: <code>22</code>\n• 范围: <code>25000-25100</code>", parse_mode="HTML", reply_markup=self._build_port_quick_keyboard(show_back=True))
+                self.answer_callback_query(callback_query_id, "已返回")
+                return
+            
+            # 默认返回主菜单
+            self._clear_menu_state(chat_id, user_id)
+            self.edit_message_text(chat_id=chat_id, message_id=message_id, text="<b>🧭 安全列表管理菜单</b>\n请选择要执行的操作：", parse_mode="HTML", reply_markup=self.build_sl_root_keyboard())
+            self.answer_callback_query(callback_query_id, "已返回主菜单")
+            return
+
+        if data == "slm:apply":
+            state = self._get_menu_state(chat_id, user_id)
+            result = self._execute_sl_menu_action(state)
+            self._clear_menu_state(chat_id, user_id)
+            self.edit_message_text(chat_id=chat_id, message_id=message_id, text=result, parse_mode="HTML")
+            self.answer_callback_query(callback_query_id, "已提交")
+            return
+
+        if data == "slm:cancel":
+            self._clear_menu_state(chat_id, user_id)
+            self.edit_message_text(chat_id=chat_id, message_id=message_id, text="<b>已取消当前操作</b>\n可重新从菜单选择。", parse_mode="HTML", reply_markup=self.build_sl_root_keyboard())
+            self.answer_callback_query(callback_query_id, "已取消")
+            return
+
+        self.answer_callback_query(callback_query_id, "未知操作")
 
     def process_update(self, update: Dict[str, Any]) -> None:
         self.last_update_id = max(self.last_update_id, int(update.get("update_id", 0)))
@@ -2067,6 +2897,57 @@ class TelegramBotRunner:
 
         try:
             LOGGER.info(f"🚀 开始处理命令: {text[:100]}")
+            user_id = str(safe_get(safe_get(message, "from", {}), "id", ""))
+            state = self._get_menu_state(chat_id, user_id)
+            if state and not text.strip().startswith("/"):
+                awaiting = state.get("awaiting")
+                action = state.get("action", "")
+                
+                if awaiting == "cidr":
+                    valid, parsed_cidr, error_msg = self._parse_cidr_input(text.strip())
+                    if not valid:
+                        # CIDR 无效，保持当前状态并报错
+                        self.send_message(chat_id, error_msg, parse_mode="HTML", reply_markup=build_inline_keyboard([[{"text": "⬅️ 返回上一步", "callback_data": "slm:back:protocol"}, {"text": "🏠 主菜单", "callback_data": "slm:home"}]]))
+                        return
+                    
+                    state["cidr"] = parsed_cidr
+                    protocol = str(state.get("protocol"))
+                    
+                    if not self._protocol_needs_port(protocol):
+                        state["port_min"] = None
+                        state["port_max"] = None
+                        state["awaiting"] = "description"
+                        self._set_menu_state(chat_id, user_id, state)
+                        self.send_message(chat_id, "<b>请输入规则描述</b>\n\n可直接发送描述文本\n若留空请发送: <code>-</code>", parse_mode="HTML", reply_markup=build_inline_keyboard([[{"text": "⬅️ 返回上一步", "callback_data": "slm:back:cidr"}, {"text": "🏠 主菜单", "callback_data": "slm:home"}]]))
+                        return
+                    
+                    state["awaiting"] = "port"
+                    self._set_menu_state(chat_id, user_id, state)
+                    self.send_message(chat_id, "<b>请输入端口</b>\n\n支持格式：\n• 单端口: <code>22</code>\n• 范围: <code>25000-25100</code>", parse_mode="HTML", reply_markup=build_inline_keyboard([[{"text": "⬅️ 返回上一步", "callback_data": "slm:back:cidr"}, {"text": "🏠 主菜单", "callback_data": "slm:home"}]]))
+                    return
+                
+                if awaiting == "port":
+                    valid, port_min, port_max, error_msg = self._parse_port_input(text.strip())
+                    if not valid:
+                        # 端口无效，保持当前状态并报错
+                        self.send_message(chat_id, error_msg, parse_mode="HTML", reply_markup=build_inline_keyboard([[{"text": "⬅️ 返回上一步", "callback_data": "slm:back:cidr"}, {"text": "🏠 主菜单", "callback_data": "slm:home"}]]))
+                        return
+                    
+                    state["port_min"] = port_min
+                    state["port_max"] = port_max
+                    state["awaiting"] = "description"
+                    self._set_menu_state(chat_id, user_id, state)
+                    self.send_message(chat_id, "<b>请输入规则描述</b>\n\n可直接发送描述文本\n若留空请发送: <code>-</code>", parse_mode="HTML", reply_markup=build_inline_keyboard([[{"text": "⬅️ 返回上一步", "callback_data": "slm:back:port"}, {"text": "🏠 主菜单", "callback_data": "slm:home"}]]))
+                    return
+                
+                if awaiting == "description":
+                    state["description"] = None if text.strip() in {"-", "无", "none"} else text.strip()
+                    state.pop("awaiting", None)
+                    self._set_menu_state(chat_id, user_id, state)
+                    preview_text, preview_keyboard = self._build_sl_apply_preview(state)
+                    self.send_message(chat_id, preview_text, parse_mode="HTML", reply_markup=preview_keyboard)
+                    return
+
             if text.strip().startswith("/usage_fee"):
                 LOGGER.info("📊 处理 /usage_fee 命令")
                 report_data = get_usage_fee_report_data(self.app_config)
@@ -2074,6 +2955,11 @@ class TelegramBotRunner:
                 keyboard = self.build_usage_fee_keyboard(False, len(report_data["unique_dates"]), report_data["display_days"])
                 self.send_message(chat_id, rendered, parse_mode="HTML", reply_markup=keyboard)
                 LOGGER.info("✅ /usage_fee 命令处理完成")
+                return
+
+            if text.strip().startswith("/sl_menu"):
+                self._clear_menu_state(chat_id, user_id)
+                self.send_message(chat_id, "<b>🧭 安全列表管理菜单</b>\n请选择要执行的操作：", parse_mode="HTML", reply_markup=self.build_sl_root_keyboard())
                 return
 
             result = self.handle_command(text)
@@ -2207,41 +3093,8 @@ def main() -> None:
     inet = sub.add_parser("instance-network", help="查询实例网络安全总览")
     inet.add_argument("instance_id", help="实例 OCID")
 
-    nsg = sub.add_parser("nsg-rules", help="查询 NSG 规则")
-    nsg.add_argument("nsg_id", help="NSG 的 OCID")
-
-    sl = sub.add_parser("security-list-rules", help="查询 Security List 规则")
-    sl.add_argument("security_list_id", help="Security List 的 OCID")
-
-    sle = sub.add_parser("security-list-export", help="导出 Security List 规则备份")
-    sle.add_argument("security_list_id", help="Security List 的 OCID")
-    sle.add_argument("--output", help="导出 JSON 路径")
-
-    sla = sub.add_parser("security-list-add-ingress", help="添加 Security List Ingress 规则（默认预览）")
-    sla.add_argument("security_list_id", help="Security List 的 OCID")
-    sla.add_argument("--source", required=True, help="来源 CIDR，例如 0.0.0.0/0")
-    sla.add_argument("--protocol", default="6", help="协议号，默认 6(TCP)")
-    sla.add_argument("--port-min", type=int, help="目标最小端口")
-    sla.add_argument("--port-max", type=int, help="目标最大端口")
-    sla.add_argument("--description", help="规则描述")
-    sla.add_argument("--stateless", action="store_true", help="是否为无状态规则")
-    sla.add_argument("--apply", action="store_true", help="真正提交变更；默认仅预览")
-
-    slr = sub.add_parser("security-list-remove-ingress", help="删除 Security List Ingress 规则（默认预览）")
-    slr.add_argument("security_list_id", help="Security List 的 OCID")
-    slr.add_argument("--rule-index", type=int, required=True, help="要删除的 Ingress 规则序号（从 1 开始）")
-    slr.add_argument("--apply", action="store_true", help="真正提交变更；默认仅预览")
-
-    csp = sub.add_parser("create-safe-policy", help="创建/修复永不过期安全策略")
-    csp.add_argument("--auto-approve", action="store_true", help="无需交互确认")
-
-    dp = sub.add_parser("delete-policy", help="删除冗余密码策略")
-    dp.add_argument("name", help="策略名称")
-    dp.add_argument("--auto-approve", action="store_true", help="无需交互确认")
-
-    # 兼容旧版 run action
     runp = sub.add_parser("run", help="兼容旧版：运行预设动作")
-    runp.add_argument("action", help="user_info|usage_fee|policies|audit_events[:N]|instance_network:<OCID>|nsg_rules:<OCID>|sl_rules:<OCID>|create_safe_policy|delete_policy:<名称>")
+    runp.add_argument("action", help="user_info|usage_fee|policies|audit_events[:N]|instance_network:<OCID>|create_safe_policy|delete_policy:<名称>")
 
     args = parser.parse_args()
 
@@ -2274,13 +3127,7 @@ def main() -> None:
         )
     if args.cmd == "instance-network":
         return show_instance_network(app_config, instance_id=args.instance_id)
-    if args.cmd == "nsg-rules":
-        return show_nsg_rules(app_config, nsg_id=args.nsg_id)
-    if args.cmd == "security-list-rules":
-        return show_security_list_rules(app_config, security_list_id=args.security_list_id)
-    if args.cmd == "security-list-export":
-        print(export_security_list_rules(app_config, security_list_id=args.security_list_id, output_path=args.output))
-        return
+
     if args.cmd == "security-list-add-ingress":
         return add_security_list_ingress_rule(
             app_config,
@@ -2300,6 +3147,51 @@ def main() -> None:
             rule_index=args.rule_index,
             apply=args.apply,
         )
+    if args.cmd == "security-list-add-egress":
+        return add_security_list_egress_rule(
+            app_config,
+            security_list_id=args.security_list_id,
+            destination=args.destination,
+            protocol=args.protocol,
+            port_min=args.port_min,
+            port_max=args.port_max,
+            description=args.description,
+            stateless=args.stateless,
+            apply=args.apply,
+        )
+    if args.cmd == "security-list-remove-egress":
+        return remove_security_list_egress_rule(
+            app_config,
+            security_list_id=args.security_list_id,
+            rule_index=args.rule_index,
+            apply=args.apply,
+        )
+    if args.cmd == "security-list-replace-ingress":
+        return replace_security_list_ingress_rule(
+            app_config,
+            security_list_id=args.security_list_id,
+            rule_index=args.rule_index,
+            source=args.source,
+            protocol=args.protocol,
+            port_min=args.port_min,
+            port_max=args.port_max,
+            description=args.description,
+            stateless=args.stateless,
+            apply=args.apply,
+        )
+    if args.cmd == "security-list-replace-egress":
+        return replace_security_list_egress_rule(
+            app_config,
+            security_list_id=args.security_list_id,
+            rule_index=args.rule_index,
+            destination=args.destination,
+            protocol=args.protocol,
+            port_min=args.port_min,
+            port_max=args.port_max,
+            description=args.description,
+            stateless=args.stateless,
+            apply=args.apply,
+        )
     if args.cmd == "create-safe-policy":
         return create_safe_policy(app_config, auto_approve=args.auto_approve)
     if args.cmd == "delete-policy":
@@ -2314,15 +3206,12 @@ def main() -> None:
             return list_policies(app_config)
         if action.startswith("instance_network:"):
             return show_instance_network(app_config, instance_id=action.split(":", 1)[1].strip())
-        if action.startswith("nsg_rules:"):
-            return show_nsg_rules(app_config, nsg_id=action.split(":", 1)[1].strip())
-        if action.startswith("sl_rules:"):
-            return show_security_list_rules(app_config, security_list_id=action.split(":", 1)[1].strip())
+
         if action == "create_safe_policy":
             return create_safe_policy(app_config, auto_approve=True)
         if action.startswith("delete_policy:"):
             return delete_policy(app_config, target_name=action.split(":", 1)[1].strip(), auto_approve=True)
-        raise ValueError("不支持的 action。可选: user_info, usage_fee, policies, audit_events[:N], instance_network:<OCID>, nsg_rules:<OCID>, sl_rules:<OCID>, create_safe_policy, delete_policy:<名称>")
+        raise ValueError("不支持的 action。可选: user_info, usage_fee, policies, audit_events[:N], instance_network:<OCID>, create_safe_policy, delete_policy:<名称>")
 
 
 if __name__ == "__main__":
