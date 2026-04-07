@@ -85,8 +85,13 @@ def create_policy(
             None,
         )
         
+        # 如果找不到指定的源策略，使用第一个可用策略
+        if not source_policy and policies:
+            source_policy = policies[0]
+            LOGGER.info(f"⚠️ 未找到 {policy_cfg['source_policy_name']}，使用 {getattr(source_policy, 'name', 'N/A')} 作为源策略")
+        
         if not source_policy:
-            return False, f"❌ 未找到源策略: {policy_cfg['source_policy_name']}"
+            return False, "❌ 系统中没有可用的策略，无法创建新策略"
         
         # 构建新策略
         new_policy_details = {
