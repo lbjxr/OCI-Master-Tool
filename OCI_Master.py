@@ -19,6 +19,16 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+# 导入新模块
+from telegram.menus.policy_menu import (
+    render_pm_home, render_pm_list, render_pm_create_step1,
+    render_pm_create_step2, render_pm_create_confirm,
+    render_pm_delete_list, render_pm_delete_confirm,
+    get_pm_state, set_pm_state, clear_pm_state,
+    validate_policy_name, validate_expires_days
+)
+from features.policies import create_policy, delete_policy
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_APP_CONFIG_PATH = os.path.join(BASE_DIR, "oci_master_config.json")
@@ -2103,68 +2113,6 @@ def create_safe_policy(app_config: Optional[Dict[str, Any]] = None, auto_approve
             print(f"❌ 同步失败: {e}")
 
 
-def delete_policy(
-    app_config: Optional[Dict[str, Any]] = None,
-    target_name: Optional[str] = None,
-    auto_approve: bool = False,
-) -> None:
-    """功能 5：删除指定密码策略。"""
-    print("\n" + "=" * 80)
-    print("🗑️ 准备删除策略，正在拉取当前策略列表...")
-    current_target_name = target_name or ""
-
-    try:
-        app_config = app_config or load_app_config()
-        config = get_oci_config(app_config)
-        domain_name = app_config.get("oci", {}).get("identity_domain_name", "Default")
-        id_domains_client = get_identity_domains_client(config, domain_name=domain_name)
-
-        has_policies = _print_policy_table(id_domains_client)
-        if not has_policies:
-            return
-
-        if not current_target_name:
-            current_target_name = input("\n👉 请输入表格中要删除的【策略名称】(直接回车可取消操作): ").strip()
-
-        if not current_target_name:
-            print("🛑 已取消操作。")
-            return
-
-        if not auto_approve:
-            confirm = input(f"⚠️ 警告: 确定要永久删除策略 '{current_target_name}' 吗？(y/n): ").strip().lower()
-            if confirm != "y":
-                print("🛑 已取消删除操作。")
-                return
-
-        print(f"--- 正在执行删除: {current_target_name} ---")
-        response = id_domains_client.list_password_policies()
-        resources = getattr(response.data, "resources", [])
-        target_policy = next(
-            (p for p in resources if getattr(p, "name", "") == current_target_name),
-            None,
-        )
-
-        if not target_policy:
-            print(f"⚠️ 未找到名为 '{current_target_name}' 的策略，请检查拼写大小写是否正确。")
-            return
-
-        res = id_domains_client.delete_password_policy(password_policy_id=target_policy.id)
-        if res.status == 204:
-            print(f"✅ 成功删除策略: {current_target_name}")
-            print("\n🔍 删除后的最新策略列表如下：")
-            _print_policy_table(id_domains_client)
-        else:
-            print(f"⚠️ 删除返回状态码: {res.status}")
-    except Exception as e:
-        if "checkProtectedResource" in str(e):
-            print(f"❌ 删除失败：'{current_target_name}' 是系统预设的保护资源，官方禁止删除。")
-        else:
-            print(f"❌ 操作出错: {e}")
-
-
-# ==========================================
-# 4. Telegram Bot 集成
-# ==========================================
 class TelegramBotRunner:
     MENU_SESSION_FILE = os.path.join(BASE_DIR, ".telegram_menu_sessions.json")
     MENU_SESSION_TTL_SECONDS = 3600
@@ -2316,6 +2264,7 @@ class TelegramBotRunner:
             {"command": "policies", "description": "查询密码策略看板"},
             {"command": "audit_events", "description": "查询审计事件日志"},
             {"command": "instance_info", "description": "查询实例信息总览"},
+            {"command": "policy_menu", "description": "密码策略菜单管理"},
             {"command": "sl_menu", "description": "安全列表菜单式管理"},
             {"command": "create_safe_policy", "description": "创建永不过期安全策略"},
             {"command": "delete_policy", "description": "删除指定密码策略"},
@@ -2351,6 +2300,7 @@ class TelegramBotRunner:
             "🛡️ /policies - 密码策略看板\n"
             "📋 /audit_events - 审计事件日志\n"
             "🖥️ /instance_info - 查询所有实例详细信息\n"
+            "🔐 /policy_menu - 密码策略菜单管理\n"
             "🧭 /sl_menu - 安全列表菜单式管理\n\n"
             "<b>⚙️ 管理命令</b>\n"
             "🔒 /create_safe_policy - 创建永不过期策略\n"
@@ -2670,14 +2620,11 @@ class TelegramBotRunner:
         ])
         return "\n".join(lines), kb
 
-    def handle_command(self, text: str) -> str:
+    def handle_command(self, text: str, chat_id: Optional[int] = None) -> str:
         normalized = (text or "").strip()
         if not normalized:
             return "未收到命令内容。"
 
-        if normalized.startswith("/sl_menu"):
-            return "<b>🧭 安全列表管理菜单</b>\n请选择要执行的操作："
-        if normalized.startswith("/start"):
             return "欢迎使用 OCI Master Telegram Bot。\n" + self.build_help_text()
         if normalized.startswith("/help") or normalized.startswith("/menu"):
             return self.build_help_text()
@@ -2822,6 +2769,10 @@ class TelegramBotRunner:
             self.answer_callback_query(callback_query_id, "已更新显示内容")
             return
 
+        # Policy Menu 回调处理
+        if data.startswith("pm:"):
+            return self.handle_policy_menu_callback(int(chat_id), message_id, data, self.app_config)
+        
         if data == "slm:home":
             self._clear_menu_state(chat_id, user_id)
             self.edit_message_text(chat_id=chat_id, message_id=message_id, text="<b>🧭 安全列表管理菜单</b>\n请选择要执行的操作：", parse_mode="HTML", reply_markup=self.build_sl_root_keyboard())
@@ -3128,7 +3079,42 @@ class TelegramBotRunner:
                 self.send_message(chat_id, "<b>🧭 安全列表管理菜单</b>\n请选择要执行的操作：", parse_mode="HTML", reply_markup=self.build_sl_root_keyboard())
                 return
 
-            result = self.handle_command(text)
+            if text.strip().startswith("/policy_menu"):
+                clear_pm_state(int(chat_id))
+                pm_text, pm_keyboard = render_pm_home()
+                self.send_message(chat_id, pm_text, parse_mode="HTML", reply_markup=pm_keyboard)
+                return
+
+            # Policy Menu 状态处理（用户输入策略名称或天数）
+            pm_state = get_pm_state(int(chat_id))
+            pm_step = pm_state.get("step", "")
+            
+            if pm_step == "create_wait_name":
+                # 用户输入了策略名称
+                is_valid, error_msg = validate_policy_name(text.strip())
+                if not is_valid:
+                    self.send_message(chat_id, f"❌ {error_msg}\n\n请重新输入有效的策略名称：")
+                    return
+                
+                # 进入步骤2：选择过期天数
+                pm_text, pm_keyboard = render_pm_create_step2(int(chat_id), text.strip())
+                self.send_message(chat_id, pm_text, parse_mode="HTML", reply_markup=pm_keyboard)
+                return
+            
+            elif pm_step == "create_wait_custom_days":
+                # 用户输入了自定义天数
+                is_valid, days, error_msg = validate_expires_days(text.strip())
+                if not is_valid:
+                    self.send_message(chat_id, f"❌ {error_msg}\n\n请重新输入有效的天数（0-36500）：")
+                    return
+                
+                policy_name = pm_state.get("policy_name", "")
+                pm_text, pm_keyboard = render_pm_create_confirm(int(chat_id), policy_name, days)
+                self.send_message(chat_id, pm_text, parse_mode="HTML", reply_markup=pm_keyboard)
+                return
+
+
+            result = self.handle_command(text, chat_id=int(chat_id))
             LOGGER.info(f"✅ 命令处理完成，结果长度: {len(result)} 字符")
         except Exception as exc:
             LOGGER.exception(f"❌ 命令执行失败: {text[:50]}")
@@ -3179,6 +3165,108 @@ class TelegramBotRunner:
 # ==========================================
 # 5. 主程序菜单与入口
 # ==========================================
+    def handle_policy_menu_callback(self, chat_id: int, message_id: int, data: str, app_config: Dict[str, Any]) -> None:
+        """处理策略菜单回调"""
+        from telegram.menus.policy_menu import build_inline_keyboard
+        
+        try:
+            parts = data.split(":")
+            action = parts[1] if len(parts) > 1 else ""
+            
+            # 主菜单
+            if action == "home":
+                clear_pm_state(chat_id)
+                text, keyboard = render_pm_home()
+                return self.edit_message_text(chat_id=str(chat_id), message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+            
+            # 查看策略列表
+            elif action == "view":
+                text, keyboard = render_pm_list(app_config)
+                return self.edit_message_text(chat_id=str(chat_id), message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+            
+            # 创建策略流程
+            elif action == "create":
+                if len(parts) == 2:
+                    # 步骤1：输入策略名称
+                    text, keyboard = render_pm_create_step1(chat_id)
+                    return self.edit_message_text(chat_id=str(chat_id), message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+                elif parts[2] == "days":
+                    # 步骤2：选择过期天数
+                    state = get_pm_state(chat_id)
+                    policy_name = state.get("policy_name", "")
+                    if not policy_name:
+                        return self.send_message(str(chat_id), "❌ 会话已过期，请重新开始")
+                    
+                    if len(parts) > 3 and parts[3] == "custom":
+                        # 等待用户输入自定义天数
+                        state["step"] = "create_wait_custom_days"
+                        set_pm_state(chat_id, state)
+                        return self.send_message(str(chat_id), "请输入自定义过期天数（0-36500）：")
+                    else:
+                        # 选择了预设天数
+                        days = int(parts[3])
+                        text, keyboard = render_pm_create_confirm(chat_id, policy_name, days)
+                        return self.edit_message_text(chat_id=str(chat_id), message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+                elif parts[2] == "confirm":
+                    # 确认创建
+                    state = get_pm_state(chat_id)
+                    policy_name = state.get("policy_name", "")
+                    expires_days = int(parts[3])
+                    
+                    success, message = create_policy(policy_name, expires_days, app_config)
+                    
+                    clear_pm_state(chat_id)
+                    
+                    result_text = f"{message}\n\n"
+                    if success:
+                        result_text += "策略已创建成功！"
+                    
+                    keyboard = build_inline_keyboard([
+                        [{"text": "📋 查看策略列表", "callback_data": "pm:view"}],
+                        [{"text": "🏠 返回主菜单", "callback_data": "pm:home"}]
+                    ])
+                    
+                    return self.edit_message_text(chat_id=str(chat_id), message_id=message_id, text=result_text, parse_mode="HTML", reply_markup=keyboard)
+                elif parts[2] == "back_to_days":
+                    # 返回选择天数
+                    state = get_pm_state(chat_id)
+                    policy_name = state.get("policy_name", "")
+                    text, keyboard = render_pm_create_step2(chat_id, policy_name)
+                    return self.edit_message_text(chat_id=str(chat_id), message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+            
+            # 删除策略流程
+            elif action == "delete":
+                if len(parts) == 2:
+                    # 显示策略列表
+                    text, keyboard = render_pm_delete_list(app_config)
+                    return self.edit_message_text(chat_id=str(chat_id), message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+                elif parts[2] == "policy":
+                    # 显示删除确认
+                    policy_name = ":".join(parts[3:])  # 策略名可能包含冒号
+                    text, keyboard = render_pm_delete_confirm(policy_name, app_config)
+                    return self.edit_message_text(chat_id=str(chat_id), message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+                elif parts[2] == "confirm":
+                    # 确认删除
+                    policy_name = ":".join(parts[3:])
+                    
+                    success, message = delete_policy(policy_name, app_config)
+                    
+                    result_text = f"{message}\n\n"
+                    
+                    keyboard = build_inline_keyboard([
+                        [{"text": "📋 查看策略列表", "callback_data": "pm:view"}],
+                        [{"text": "🏠 返回主菜单", "callback_data": "pm:home"}]
+                    ])
+                    
+                    return self.edit_message_text(chat_id=str(chat_id), message_id=message_id, text=result_text, parse_mode="HTML", reply_markup=keyboard)
+            
+            else:
+                return self.send_message(str(chat_id), f"❌ 未知操作: {data}")
+        
+        except Exception as e:
+            LOGGER.exception("处理策略菜单回调失败")
+            return self.send_message(str(chat_id), f"❌ 处理失败: {str(e)[:200]}")
+
 def print_cli_menu() -> None:
     print("\n" + "☁️  OCI 甲骨文云一键运维工具 ☁️ ".center(50))
     print("=" * 62)
@@ -3193,6 +3281,7 @@ def print_cli_menu() -> None:
     print("  9. 🤖 启动 Telegram Bot 轮询")
     print("  0. 🚪 退出程序")
     print("=" * 62)
+
 
 
 def main_menu(app_config: Dict[str, Any]) -> None:
