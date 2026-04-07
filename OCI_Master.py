@@ -1812,6 +1812,17 @@ def _get_instance_details(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     compute_client = _get_compute_client(config)
     instances = _list_instances(config)
     
+    LOGGER.info(f"📈 找到 {len(instances)} 个实例")
+    
+    # 创建 Blockstorage 客户端
+    storage_client = oci.core.BlockstorageClient({
+        "user": config["user"],
+        "key_file": config["key_file"],
+        "fingerprint": config["fingerprint"],
+        "tenancy": config["tenancy"],
+        "region": config["region"]
+    })
+    
     result = []
     for inst in instances:
         try:
@@ -1819,24 +1830,24 @@ def _get_instance_details(config: Dict[str, Any]) -> List[Dict[str, Any]]:
             shape = safe_get(inst, "shape")
             shape_config = safe_get(inst, "shape_config") or {}
             
-            # 获取启动卷信息
-            boot_volume_id = safe_get(inst, "source_details", {}).get("boot_volume_id")
-            boot_volume_size_gb = None
-            
-            # 尝试获取启动卷大小
+            # 获取启动卷大小
+            boot_volume_size_gb = 50  # 默认值
             try:
-                if boot_volume_id:
-                    storage_client = oci.core.BlockstorageClient({
-                        "user": config["user"],
-                        "key_file": config["key_file"],
-                        "fingerprint": config["fingerprint"],
-                        "tenancy": config["tenancy"],
-                        "region": config["region"]
-                    })
-                    boot_volume = storage_client.get_boot_volume(boot_volume_id).data
-                    boot_volume_size_gb = safe_get(boot_volume, "size_in_gbs")
-            except Exception:
-                pass
+                # 获取启动卷附件
+                boot_volume_attachments = compute_client.list_boot_volume_attachments(
+                    availability_domain=safe_get(inst, "availability_domain"),
+                    compartment_id=config["tenancy"],
+                    instance_id=safe_get(inst, "id")
+                ).data
+                
+                if boot_volume_attachments:
+                    boot_volume_id = safe_get(boot_volume_attachments[0], "boot_volume_id")
+                    if boot_volume_id:
+                        boot_volume = storage_client.get_boot_volume(boot_volume_id).data
+                        boot_volume_size_gb = safe_get(boot_volume, "size_in_gbs") or 50
+                        LOGGER.info(f"💾 获取到 {safe_get(inst, 'display_name')} 的启动卷大小: {boot_volume_size_gb} GB")
+            except Exception as e:
+                LOGGER.warning(f"⚠️ 获取启动卷大小失败，使用默认值: {e}")
             
             # 构建详细信息
             detail = {
@@ -1846,16 +1857,19 @@ def _get_instance_details(config: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "shape": shape,
                 "ocpus": safe_get(shape_config, "ocpus"),
                 "memory_in_gbs": safe_get(shape_config, "memory_in_gbs"),
-                "boot_volume_size_gb": boot_volume_size_gb or 50,  # 默认 50GB
+                "boot_volume_size_gb": boot_volume_size_gb,
                 "availability_domain": safe_get(inst, "availability_domain"),
                 "time_created": safe_get(inst, "time_created"),
                 "region": config.get("region", "unknown"),
             }
             result.append(detail)
+            LOGGER.info(f"✅ 处理实例: {detail['display_name']}")
         except Exception as e:
-            # 如果单个实例失败，继续处理其他实例
+            # 如果单个实例失败，记录日志并继续
+            LOGGER.warning(f"⚠️ 处理实例失败: {e}")
             continue
     
+    LOGGER.info(f"✅ 成功处理 {len(result)} 个实例")
     return result
 
 
@@ -2724,10 +2738,15 @@ class TelegramBotRunner:
                 return f"❌ 查询失败: {str(e)[:200]}"
         if normalized.startswith("/instance_info"):
             try:
+                LOGGER.info("🔍 开始获取实例信息...")
                 app_config = self.app_config or load_app_config()
                 config = get_oci_config(app_config)
+                LOGGER.info("🔑 配置加载成功")
                 instances = _get_instance_details(config)
-                return render_instance_info_telegram(instances)
+                LOGGER.info(f"📊 获取到 {len(instances)} 个实例详细信息")
+                result = render_instance_info_telegram(instances)
+                LOGGER.info(f"✅ 格式化完成，长度 {len(result)} 字符")
+                return result
             except Exception as e:
                 LOGGER.exception("查询实例信息总览失败")
                 return f"❌ 查询失败: {str(e)[:200]}"
