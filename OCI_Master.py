@@ -1720,7 +1720,8 @@ def _translate_lifecycle_state(value: Any) -> str:
     return mapping.get(text.upper(), text or "未知")
 
 
-def render_instance_info_telegram(topology: Dict[str, Any]) -> str:
+def render_instance_network_telegram(topology: Dict[str, Any]) -> str:
+    """渲染实例网络拓扑信息（旧版，保留兼容）"""
     instance = topology["instance"]
     entries = topology["vnics"]
     parts = [
