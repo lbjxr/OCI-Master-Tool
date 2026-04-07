@@ -3141,6 +3141,41 @@ class TelegramBotRunner:
                 self.send_message(chat_id, "<b>🧭 安全列表管理菜单</b>\n请选择要执行的操作：", parse_mode="HTML", reply_markup=self.build_sl_root_keyboard())
                 return
 
+            if text.strip().startswith("/policy_menu"):
+                clear_pm_state(int(chat_id))
+                pm_text, pm_keyboard = render_pm_home()
+                self.send_message(chat_id, pm_text, parse_mode="HTML", reply_markup=pm_keyboard)
+                return
+
+            # Policy Menu 状态处理（用户输入策略名称或天数）
+            pm_state = get_pm_state(int(chat_id))
+            pm_step = pm_state.get("step", "")
+            
+            if pm_step == "create_wait_name":
+                # 用户输入了策略名称
+                is_valid, error_msg = validate_policy_name(text.strip())
+                if not is_valid:
+                    self.send_message(chat_id, f"❌ {error_msg}\n\n请重新输入有效的策略名称：")
+                    return
+                
+                # 进入步骤2：选择过期天数
+                pm_text, pm_keyboard = render_pm_create_step2(int(chat_id), text.strip())
+                self.send_message(chat_id, pm_text, parse_mode="HTML", reply_markup=pm_keyboard)
+                return
+            
+            elif pm_step == "create_wait_custom_days":
+                # 用户输入了自定义天数
+                is_valid, days, error_msg = validate_expires_days(text.strip())
+                if not is_valid:
+                    self.send_message(chat_id, f"❌ {error_msg}\n\n请重新输入有效的天数（0-36500）：")
+                    return
+                
+                policy_name = pm_state.get("policy_name", "")
+                pm_text, pm_keyboard = render_pm_create_confirm(int(chat_id), policy_name, days)
+                self.send_message(chat_id, pm_text, parse_mode="HTML", reply_markup=pm_keyboard)
+                return
+
+
             result = self.handle_command(text, chat_id=int(chat_id))
             LOGGER.info(f"✅ 命令处理完成，结果长度: {len(result)} 字符")
         except Exception as exc:
