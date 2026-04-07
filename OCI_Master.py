@@ -2113,68 +2113,6 @@ def create_safe_policy(app_config: Optional[Dict[str, Any]] = None, auto_approve
             print(f"❌ 同步失败: {e}")
 
 
-def delete_policy(
-    app_config: Optional[Dict[str, Any]] = None,
-    target_name: Optional[str] = None,
-    auto_approve: bool = False,
-) -> None:
-    """功能 5：删除指定密码策略。"""
-    print("\n" + "=" * 80)
-    print("🗑️ 准备删除策略，正在拉取当前策略列表...")
-    current_target_name = target_name or ""
-
-    try:
-        app_config = app_config or load_app_config()
-        config = get_oci_config(app_config)
-        domain_name = app_config.get("oci", {}).get("identity_domain_name", "Default")
-        id_domains_client = get_identity_domains_client(config, domain_name=domain_name)
-
-        has_policies = _print_policy_table(id_domains_client)
-        if not has_policies:
-            return
-
-        if not current_target_name:
-            current_target_name = input("\n👉 请输入表格中要删除的【策略名称】(直接回车可取消操作): ").strip()
-
-        if not current_target_name:
-            print("🛑 已取消操作。")
-            return
-
-        if not auto_approve:
-            confirm = input(f"⚠️ 警告: 确定要永久删除策略 '{current_target_name}' 吗？(y/n): ").strip().lower()
-            if confirm != "y":
-                print("🛑 已取消删除操作。")
-                return
-
-        print(f"--- 正在执行删除: {current_target_name} ---")
-        response = id_domains_client.list_password_policies()
-        resources = getattr(response.data, "resources", [])
-        target_policy = next(
-            (p for p in resources if getattr(p, "name", "") == current_target_name),
-            None,
-        )
-
-        if not target_policy:
-            print(f"⚠️ 未找到名为 '{current_target_name}' 的策略，请检查拼写大小写是否正确。")
-            return
-
-        res = id_domains_client.delete_password_policy(password_policy_id=target_policy.id)
-        if res.status == 204:
-            print(f"✅ 成功删除策略: {current_target_name}")
-            print("\n🔍 删除后的最新策略列表如下：")
-            _print_policy_table(id_domains_client)
-        else:
-            print(f"⚠️ 删除返回状态码: {res.status}")
-    except Exception as e:
-        if "checkProtectedResource" in str(e):
-            print(f"❌ 删除失败：'{current_target_name}' 是系统预设的保护资源，官方禁止删除。")
-        else:
-            print(f"❌ 操作出错: {e}")
-
-
-# ==========================================
-# 4. Telegram Bot 集成
-# ==========================================
 class TelegramBotRunner:
     MENU_SESSION_FILE = os.path.join(BASE_DIR, ".telegram_menu_sessions.json")
     MENU_SESSION_TTL_SECONDS = 3600
