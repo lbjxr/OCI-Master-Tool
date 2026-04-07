@@ -2257,17 +2257,13 @@ class TelegramBotRunner:
     def build_bot_commands(self) -> List[Dict[str, str]]:
         return [
             {"command": "start", "description": "查看欢迎信息"},
-            {"command": "help", "description": "查看帮助菜单"},
-            {"command": "menu", "description": "查看帮助菜单"},
+            {"command": "menu", "description": "显示命令菜单"},
             {"command": "user_info", "description": "查看当前用户详细信息"},
             {"command": "usage_fee", "description": "查询本月费用账单"},
-            {"command": "policies", "description": "查询密码策略看板"},
             {"command": "audit_events", "description": "查询审计事件日志"},
             {"command": "instance_info", "description": "查询实例信息总览"},
             {"command": "policy_menu", "description": "密码策略菜单管理"},
-            {"command": "sl_menu", "description": "安全列表菜单式管理"},
-            {"command": "create_safe_policy", "description": "创建永不过期安全策略"},
-            {"command": "delete_policy", "description": "删除指定密码策略"},
+            {"command": "sl_menu", "description": "网络防火墙配置"},
         ]
 
     def refresh_bot_commands(self) -> None:
@@ -2297,17 +2293,13 @@ class TelegramBotRunner:
             "<b>📊 查询命令</b>\n"
             "👤 /user_info - 查看用户账号信息\n"
             "💰 /usage_fee - 本月费用账单\n"
-            "🛡️ /policies - 密码策略看板\n"
             "📋 /audit_events - 审计事件日志\n"
             "🖥️ /instance_info - 查询所有实例详细信息\n"
             "🔐 /policy_menu - 密码策略菜单管理\n"
-            "🧭 /sl_menu - 安全列表菜单式管理\n\n"
-            "<b>⚙️ 管理命令</b>\n"
-            "🔒 /create_safe_policy - 创建永不过期策略\n"
-            "🗑️ /delete_policy &lt;名称&gt; - 删除指定策略\n\n"
+            "🧭 /sl_menu - 网络防火墙配置\n\n"
             "<b>❓ 帮助</b>\n"
             "👋 /start - 欢迎信息\n"
-            "💬 /help - 显示此帮助"
+            "💬 /menu - 显示此菜单"
         )
 
     def build_usage_fee_keyboard(self, show_all: bool, unique_dates_count: int, display_days: int) -> Optional[Dict[str, Any]]:
@@ -2624,8 +2616,8 @@ class TelegramBotRunner:
         normalized = (text or "").strip()
         if not normalized:
             return "未收到命令内容。"
-
-            return "欢迎使用 OCI Master Telegram Bot。\n" + self.build_help_text()
+        if normalized.startswith("/start"):
+            return "👋 欢迎使用 OCI Master Telegram Bot！\n\n使用 /menu 查看所有可用命令。"
         if normalized.startswith("/help") or normalized.startswith("/menu"):
             return self.build_help_text()
         if normalized.startswith("/user_info"):
@@ -2646,17 +2638,6 @@ class TelegramBotRunner:
         if normalized.startswith("/usage_fee"):
             report_data = get_usage_fee_report_data(self.app_config)
             return render_usage_fee_telegram(report_data, show_all=False)
-        if normalized.startswith("/policies"):
-            try:
-                app_config = self.app_config or load_app_config()
-                config = get_oci_config(app_config)
-                domain_name = app_config.get("oci", {}).get("identity_domain_name", "Default")
-                id_domains_client = get_identity_domains_client(config, domain_name=domain_name)
-                response = id_domains_client.list_password_policies()
-                resources = getattr(response.data, "resources", [])
-                return render_policies_telegram(resources)
-            except Exception as e:
-                return f"❌ 查询失败: {str(e)[:200]}"
         if normalized.startswith("/audit_events"):
             try:
                 app_config = self.app_config or load_app_config()
@@ -2698,13 +2679,6 @@ class TelegramBotRunner:
             except Exception as e:
                 LOGGER.exception("查询实例信息总览失败")
                 return f"❌ 查询失败: {str(e)[:200]}"
-        if normalized.startswith("/create_safe_policy"):
-            return capture_output(create_safe_policy, self.app_config, True)
-        if normalized.startswith("/delete_policy"):
-            parts = normalized.split(maxsplit=1)
-            if len(parts) < 2:
-                return "请提供要删除的策略名称，例如：/delete_policy NeverExpireStandard"
-            return capture_output(delete_policy, self.app_config, parts[1].strip(), True)
         if normalized.startswith("/run"):
             parts = normalized.split(maxsplit=1)
             if len(parts) < 2:
@@ -2718,8 +2692,6 @@ class TelegramBotRunner:
         if action == "usage_fee":
             report_data = get_usage_fee_report_data(self.app_config)
             return render_usage_fee_telegram(report_data, show_all=False)
-        if action == "policies":
-            return capture_output(list_policies, self.app_config)
         if action == "audit_events" or action.startswith("audit_events:"):
             limit = 10
             if ":" in action:
@@ -2731,15 +2703,7 @@ class TelegramBotRunner:
             return capture_output(list_audit_events, self.app_config, limit)
         if action.startswith("instance_info:"):
             return capture_output(show_instance_info, self.app_config, action.split(":", 1)[1].strip())
-
-        if action == "create_safe_policy":
-            return capture_output(create_safe_policy, self.app_config, True)
-        if action.startswith("delete_policy:"):
-            policy_name = action.split(":", 1)[1].strip()
-            if not policy_name:
-                return "delete_policy 动作必须附带策略名，例如 delete_policy:NeverExpireStandard"
-            return capture_output(delete_policy, self.app_config, policy_name, True)
-        return "未知 action，可选: user_info, usage_fee, policies, audit_events[:N], instance_info:<OCID>, create_safe_policy, delete_policy:<名称>"
+        return "未知 action，可选: user_info, usage_fee, policies, audit_events[:N], instance_info:<OCID>"
 
     def handle_callback_query(self, callback_query: Dict[str, Any]) -> None:
         callback_query_id = str(callback_query.get("id", ""))
@@ -2775,7 +2739,7 @@ class TelegramBotRunner:
         
         if data == "slm:home":
             self._clear_menu_state(chat_id, user_id)
-            self.edit_message_text(chat_id=chat_id, message_id=message_id, text="<b>🧭 安全列表管理菜单</b>\n请选择要执行的操作：", parse_mode="HTML", reply_markup=self.build_sl_root_keyboard())
+            self.edit_message_text(chat_id=chat_id, message_id=message_id, text="<b>🔥 网络防火墙配置</b>\n请选择要执行的操作：", parse_mode="HTML", reply_markup=self.build_sl_root_keyboard())
             self.answer_callback_query(callback_query_id, "已返回主菜单")
             return
 
@@ -2968,7 +2932,7 @@ class TelegramBotRunner:
             
             # 默认返回主菜单
             self._clear_menu_state(chat_id, user_id)
-            self.edit_message_text(chat_id=chat_id, message_id=message_id, text="<b>🧭 安全列表管理菜单</b>\n请选择要执行的操作：", parse_mode="HTML", reply_markup=self.build_sl_root_keyboard())
+            self.edit_message_text(chat_id=chat_id, message_id=message_id, text="<b>🔥 网络防火墙配置</b>\n请选择要执行的操作：", parse_mode="HTML", reply_markup=self.build_sl_root_keyboard())
             self.answer_callback_query(callback_query_id, "已返回主菜单")
             return
 
@@ -3076,7 +3040,7 @@ class TelegramBotRunner:
 
             if text.strip().startswith("/sl_menu"):
                 self._clear_menu_state(chat_id, user_id)
-                self.send_message(chat_id, "<b>🧭 安全列表管理菜单</b>\n请选择要执行的操作：", parse_mode="HTML", reply_markup=self.build_sl_root_keyboard())
+                self.send_message(chat_id, "<b>🔥 网络防火墙配置</b>\n请选择要执行的操作：", parse_mode="HTML", reply_markup=self.build_sl_root_keyboard())
                 return
 
             if text.strip().startswith("/policy_menu"):
@@ -3337,8 +3301,6 @@ def main() -> None:
     uf.add_argument("--show-all", action="store_true", help="展示全部日期，不折叠")
     uf.add_argument("--csv-out", help="将结果另存为 CSV 路径（默认读取 output.usage_fee_csv_* 配置）")
 
-    sub.add_parser("policies", help="查询当前密码策略看板")
-
     ae = sub.add_parser("audit-events", help="查询审计事件日志")
     ae.add_argument("--limit", type=int, default=20, help="返回结果数量（默认 20）")
     ae.add_argument("--filter", help="SCIM 过滤表达式，例如: 'eventType eq \"user.login\"'")
@@ -3369,8 +3331,6 @@ def main() -> None:
             print(f"❌ 运行出错: {e}")
             sys.exit(1)
         return
-    if args.cmd == "policies":
-        return list_policies(app_config)
     if args.cmd == "audit-events":
         return list_audit_events(
             app_config,
@@ -3456,8 +3416,6 @@ def main() -> None:
             return get_user_info(app_config)
         if action == "usage_fee":
             return export_usage_fee(app_config)
-        if action == "policies":
-            return list_policies(app_config)
         if action.startswith("instance_info:"):
             return show_instance_info(app_config, instance_id=action.split(":", 1)[1].strip())
 
