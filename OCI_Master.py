@@ -2866,12 +2866,12 @@ class TelegramBotRunner:
             self.answer_callback_query(callback_query_id, "已更新显示内容")
             return
 
-        if data == "slm:home":
-            self._clear_menu_state(chat_id, user_id)
         # Policy Menu 回调处理
         if data.startswith("pm:"):
             return self.handle_policy_menu_callback(int(chat_id), message_id, data, self.app_config)
-
+        
+        if data == "slm:home":
+            self._clear_menu_state(chat_id, user_id)
             self.edit_message_text(chat_id=chat_id, message_id=message_id, text="<b>🧭 安全列表管理菜单</b>\n请选择要执行的操作：", parse_mode="HTML", reply_markup=self.build_sl_root_keyboard())
             self.answer_callback_query(callback_query_id, "已返回主菜单")
             return
