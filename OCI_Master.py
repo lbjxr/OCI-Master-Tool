@@ -1148,7 +1148,7 @@ def render_audit_events_telegram(events: List[Any], limit: int = 10) -> str:
 
 
 # ==========================================
-# 计算实例网络安全查询功能
+# 计算实例详细信息查询功能
 # ==========================================
 def _get_compute_client(config: Dict[str, Any]):
     return oci.core.ComputeClient(config)
@@ -1158,7 +1158,7 @@ def _get_virtual_network_client(config: Dict[str, Any]):
     return oci.core.VirtualNetworkClient(config)
 
 
-def _fetch_instance_network_topology(config: Dict[str, Any], instance_id: str) -> Dict[str, Any]:
+def _fetch_instance_info_topology(config: Dict[str, Any], instance_id: str) -> Dict[str, Any]:
     compute_client = _get_compute_client(config)
     vcn_client = _get_virtual_network_client(config)
 
@@ -1670,11 +1670,11 @@ def _format_rule_target(rule: Any) -> str:
     return f"{parts['protocol']} {parts['ports']}, peer={parts['peer']}, stateless={parts['stateless']}, desc={parts['desc']}"
 
 
-def _print_instance_network_topology(topology: Dict[str, Any]) -> None:
+def _print_instance_info_topology(topology: Dict[str, Any]) -> None:
     instance = topology["instance"]
     entries = topology["vnics"]
 
-    print_section("实例网络安全总览", "🧱")
+    print_section("实例信息总览", "🧱")
     print_kv("实例名称", safe_get(instance, "display_name"))
     print_kv("实例 OCID", safe_get(instance, "id"))
     print_kv("状态", safe_get(instance, "lifecycle_state"))
@@ -1721,10 +1721,11 @@ def _translate_lifecycle_state(value: Any) -> str:
 
 
 def render_instance_network_telegram(topology: Dict[str, Any]) -> str:
+    """渲染实例网络拓扑信息（旧版，保留兼容）"""
     instance = topology["instance"]
     entries = topology["vnics"]
     parts = [
-        "<b>━━━ 🧱 实例网络安全总览 ━━━</b>",
+        "<b>━━━ 🧱 实例信息总览 ━━━</b>",
         f"🏷️ 实例: <b>{html.escape(str(safe_get(instance, 'display_name')))}</b>",
         f"📌 状态: <code>{html.escape(_translate_lifecycle_state(safe_get(instance, 'lifecycle_state')))}</code>",
         f"🆔 实例 OCID: <code>{html.escape(str(safe_get(instance, 'id')))}</code>",
@@ -1807,11 +1808,77 @@ def _list_instances(config: Dict[str, Any]) -> List[Any]:
     ).data or [])
 
 
+def _get_instance_details(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """获取所有实例的详细信息，包括 CPU、内存、存储等"""
+    compute_client = _get_compute_client(config)
+    instances = _list_instances(config)
+    
+    LOGGER.info(f"📈 找到 {len(instances)} 个实例")
+    
+    # 创建 Blockstorage 客户端
+    storage_client = oci.core.BlockstorageClient({
+        "user": config["user"],
+        "key_file": config["key_file"],
+        "fingerprint": config["fingerprint"],
+        "tenancy": config["tenancy"],
+        "region": config["region"]
+    })
+    
+    result = []
+    for inst in instances:
+        try:
+            # 获取 shape 配置
+            shape = safe_get(inst, "shape")
+            shape_config = safe_get(inst, "shape_config") or {}
+            
+            # 获取启动卷大小
+            boot_volume_size_gb = 50  # 默认值
+            try:
+                # 获取启动卷附件
+                boot_volume_attachments = compute_client.list_boot_volume_attachments(
+                    availability_domain=safe_get(inst, "availability_domain"),
+                    compartment_id=config["tenancy"],
+                    instance_id=safe_get(inst, "id")
+                ).data
+                
+                if boot_volume_attachments:
+                    boot_volume_id = safe_get(boot_volume_attachments[0], "boot_volume_id")
+                    if boot_volume_id:
+                        boot_volume = storage_client.get_boot_volume(boot_volume_id).data
+                        boot_volume_size_gb = safe_get(boot_volume, "size_in_gbs") or 50
+                        LOGGER.info(f"💾 获取到 {safe_get(inst, 'display_name')} 的启动卷大小: {boot_volume_size_gb} GB")
+            except Exception as e:
+                LOGGER.warning(f"⚠️ 获取启动卷大小失败，使用默认值: {e}")
+            
+            # 构建详细信息
+            detail = {
+                "display_name": safe_get(inst, "display_name"),
+                "id": safe_get(inst, "id"),
+                "lifecycle_state": safe_get(inst, "lifecycle_state"),
+                "shape": shape,
+                "ocpus": safe_get(shape_config, "ocpus"),
+                "memory_in_gbs": safe_get(shape_config, "memory_in_gbs"),
+                "boot_volume_size_gb": boot_volume_size_gb,
+                "availability_domain": safe_get(inst, "availability_domain"),
+                "time_created": safe_get(inst, "time_created"),
+                "region": config.get("region", "unknown"),
+            }
+            result.append(detail)
+            LOGGER.info(f"✅ 处理实例: {detail['display_name']}")
+        except Exception as e:
+            # 如果单个实例失败，记录日志并继续
+            LOGGER.warning(f"⚠️ 处理实例失败: {e}")
+            continue
+    
+    LOGGER.info(f"✅ 成功处理 {len(result)} 个实例")
+    return result
+
+
 def _list_security_list_candidates(config: Dict[str, Any]) -> List[Any]:
     items = []
     for inst in _list_instances(config):
         try:
-            topo = _fetch_instance_network_topology(config, safe_get(inst, "id"))
+            topo = _fetch_instance_info_topology(config, safe_get(inst, "id"))
             for entry in topo["vnics"]:
                 for sl in entry["security_lists"]:
                     items.append((safe_get(inst, "display_name"), sl))
@@ -1823,19 +1890,79 @@ def _list_security_list_candidates(config: Dict[str, Any]) -> List[Any]:
     return list(uniq.values())
 
 
-def render_instance_candidates_telegram(instances: List[Any]) -> str:
+def render_instance_info_telegram(instances: List[Dict[str, Any]]) -> str:
+    """格式化实例信息为 Telegram 消息"""
     if not instances:
-        return "📭 <b>未找到可用实例</b>"
+        return "📭 <b>未找到任何实例</b>"
+    
     parts = [
-        "<b>━━━ 🧱 可用实例列表 ━━━</b>",
-        "💡 直接发送：<code>/instance_network &lt;instance_ocid&gt;</code>",
+        "<b>━━━ 🖥️ 实例信息总览 ━━━</b>",
+        f"📈 实例总数: <code>{len(instances)}</code>",
         "━━━━━━━━━━━━━━━━━━━━━━",
     ]
-    for idx, inst in enumerate(instances[:20], 1):
-        parts.append(f"\n<b>{idx}. {html.escape(str(safe_get(inst, 'display_name')))}</b>")
-        parts.append(f"🧾 状态: <code>{html.escape(_translate_lifecycle_state(safe_get(inst, 'lifecycle_state')))}</code>")
-        parts.append(f"🆔 OCID: <code>{html.escape(str(safe_get(inst, 'id')))}</code>")
+    
+    for idx, inst in enumerate(instances, 1):
+        state = str(inst.get("lifecycle_state", "UNKNOWN"))
+        state_text = _translate_lifecycle_state(state)
+        
+        # 状态图标
+        if "RUNNING" in state.upper():
+            state_icon = "✅"
+        elif "STOPPED" in state.upper():
+            state_icon = "🛑"
+        elif "TERMIN" in state.upper():
+            state_icon = "❌"
+        else:
+            state_icon = "⏳"
+        
+        parts.append(f"\n<b>{idx}. 💻 {html.escape(str(inst.get('display_name', 'Unknown')))}</b>")
+        parts.append(f"{state_icon} 状态: <b>{html.escape(state_text)}</b>")
+        
+        # CPU 和内存
+        ocpus = inst.get("ocpus")
+        memory = inst.get("memory_in_gbs")
+        if ocpus and memory:
+            parts.append(f"🟢 规格: <code>{ocpus} OCPU</code> · <code>{memory} GB RAM</code>")
+        elif inst.get("shape"):
+            parts.append(f"🟢 Shape: <code>{html.escape(str(inst.get('shape')))}</code>")
+        
+        # 存储
+        boot_vol = inst.get("boot_volume_size_gb")
+        if boot_vol:
+            parts.append(f"💾 存储: <code>{boot_vol} GB</code>")
+        
+        # 区域
+        region = inst.get("region")
+        if region:
+            parts.append(f"🌏 区域: <code>{html.escape(str(region))}</code>")
+        
+        # OCID (简化显示)
+        ocid = str(inst.get("id", ""))
+        ocid_short = ocid.split(".")[-1][:16] + "..." if ocid else "N/A"
+        parts.append(f"🆔 OCID: <code>{html.escape(ocid_short)}</code>")
+        
+        # 分隔线
+        if idx < len(instances):
+            parts.append("──────────────────────")
+    
     return "\n".join(parts)
+
+
+def render_instance_candidates_telegram(instances: List[Any]) -> str:
+    """兼容旧版，调用新的 render_instance_info_telegram"""
+    if not instances:
+        return "📭 <b>未找到可用实例</b>"
+    
+    # 转换为新格式
+    simple_list = []
+    for inst in instances[:20]:
+        simple_list.append({
+            "display_name": safe_get(inst, "display_name"),
+            "lifecycle_state": safe_get(inst, "lifecycle_state"),
+            "id": safe_get(inst, "id"),
+        })
+    
+    return render_instance_info_telegram(simple_list)
 
 
 def render_security_list_candidates_telegram(candidates: List[Any]) -> str:
@@ -1853,19 +1980,56 @@ def render_security_list_candidates_telegram(candidates: List[Any]) -> str:
     return "\n".join(parts)
 
 
-def show_instance_network(app_config: Optional[Dict[str, Any]] = None, instance_id: Optional[str] = None) -> None:
+def show_instance_info(app_config: Optional[Dict[str, Any]] = None) -> None:
+    """显示所有实例的详细信息"""
     print("\n" + "=" * 80)
-    print("🧱 正在获取实例网络安全总览...")
+    print("🖥️ 正在获取实例信息...")
+    try:
+        app_config = app_config or load_app_config()
+        config = get_oci_config(app_config)
+        instances = _get_instance_details(config)
+        
+        if not instances:
+            print("📭 未找到任何实例")
+            return
+        
+        print(f"\n📈 找到 {len(instances)} 个实例:\n")
+        
+        for idx, inst in enumerate(instances, 1):
+            print(f"{idx}. {inst.get('display_name')}")
+            print(f"   状态: {_translate_lifecycle_state(inst.get('lifecycle_state', 'UNKNOWN'))}")
+            
+            if inst.get('ocpus') and inst.get('memory_in_gbs'):
+                print(f"   规格: {inst.get('ocpus')} OCPU, {inst.get('memory_in_gbs')} GB RAM")
+            elif inst.get('shape'):
+                print(f"   Shape: {inst.get('shape')}")
+            
+            if inst.get('boot_volume_size_gb'):
+                print(f"   存储: {inst.get('boot_volume_size_gb')} GB")
+            
+            if inst.get('region'):
+                print(f"   区域: {inst.get('region')}")
+            
+            print(f"   OCID: {inst.get('id')}")
+            print()
+    except Exception as e:
+        LOGGER.exception("查询实例信息失败")
+        print(f"❌ 查询失败: {e}")
+
+
+def show_instance_info(app_config: Optional[Dict[str, Any]] = None, instance_id: Optional[str] = None) -> None:
+    print("\n" + "=" * 80)
+    print("🧱 正在获取实例信息总览...")
     if not instance_id:
         print("❌ 缺少 instance_id")
         return
     try:
         app_config = app_config or load_app_config()
         config = get_oci_config(app_config)
-        topology = _fetch_instance_network_topology(config, instance_id)
-        _print_instance_network_topology(topology)
+        topology = _fetch_instance_info_topology(config, instance_id)
+        _print_instance_info_topology(topology)
     except Exception as e:
-        LOGGER.exception("查询实例网络安全总览失败")
+        LOGGER.exception("查询实例信息总览失败")
         print(f"❌ 查询失败: {e}")
 
 
@@ -2151,7 +2315,7 @@ class TelegramBotRunner:
             {"command": "usage_fee", "description": "查询本月费用账单"},
             {"command": "policies", "description": "查询密码策略看板"},
             {"command": "audit_events", "description": "查询审计事件日志"},
-            {"command": "instance_network", "description": "查询实例网络安全总览"},
+            {"command": "instance_info", "description": "查询实例信息总览"},
             {"command": "sl_menu", "description": "安全列表菜单式管理"},
             {"command": "create_safe_policy", "description": "创建永不过期安全策略"},
             {"command": "delete_policy", "description": "删除指定密码策略"},
@@ -2186,7 +2350,7 @@ class TelegramBotRunner:
             "💰 /usage_fee - 本月费用账单\n"
             "🛡️ /policies - 密码策略看板\n"
             "📋 /audit_events - 审计事件日志\n"
-            "🧱 /instance_network &lt;instance_ocid&gt; - 实例网络安全总览\n"
+            "🖥️ /instance_info - 查询所有实例详细信息\n"
             "🧭 /sl_menu - 安全列表菜单式管理\n\n"
             "<b>⚙️ 管理命令</b>\n"
             "🔒 /create_safe_policy - 创建永不过期策略\n"
@@ -2367,7 +2531,7 @@ class TelegramBotRunner:
     def _get_instance_security_list_candidates(self, instance_id: str) -> Tuple[Any, List[Any]]:
         app_config = self.app_config or load_app_config()
         config = get_oci_config(app_config)
-        topo = _fetch_instance_network_topology(config, instance_id)
+        topo = _fetch_instance_info_topology(config, instance_id)
         candidates = []
         seen = set()
         for entry in topo["vnics"]:
@@ -2573,17 +2737,19 @@ class TelegramBotRunner:
             except Exception as e:
                 LOGGER.exception("查询审计事件失败")
                 return f"❌ 查询失败: {str(e)[:200]}"
-        if normalized.startswith("/instance_network"):
+        if normalized.startswith("/instance_info"):
             try:
-                parts = normalized.split(maxsplit=1)
+                LOGGER.info("🔍 开始获取实例信息...")
                 app_config = self.app_config or load_app_config()
                 config = get_oci_config(app_config)
-                if len(parts) < 2:
-                    return render_instance_candidates_telegram(_list_instances(config))
-                topology = _fetch_instance_network_topology(config, parts[1].strip())
-                return render_instance_network_telegram(topology)
+                LOGGER.info("🔑 配置加载成功")
+                instances = _get_instance_details(config)
+                LOGGER.info(f"📊 获取到 {len(instances)} 个实例详细信息")
+                result = render_instance_info_telegram(instances)
+                LOGGER.info(f"✅ 格式化完成，长度 {len(result)} 字符")
+                return result
             except Exception as e:
-                LOGGER.exception("查询实例网络安全总览失败")
+                LOGGER.exception("查询实例信息总览失败")
                 return f"❌ 查询失败: {str(e)[:200]}"
         if normalized.startswith("/create_safe_policy"):
             return capture_output(create_safe_policy, self.app_config, True)
@@ -2616,8 +2782,8 @@ class TelegramBotRunner:
                 except:
                     pass
             return capture_output(list_audit_events, self.app_config, limit)
-        if action.startswith("instance_network:"):
-            return capture_output(show_instance_network, self.app_config, action.split(":", 1)[1].strip())
+        if action.startswith("instance_info:"):
+            return capture_output(show_instance_info, self.app_config, action.split(":", 1)[1].strip())
 
         if action == "create_safe_policy":
             return capture_output(create_safe_policy, self.app_config, True)
@@ -2626,7 +2792,7 @@ class TelegramBotRunner:
             if not policy_name:
                 return "delete_policy 动作必须附带策略名，例如 delete_policy:NeverExpireStandard"
             return capture_output(delete_policy, self.app_config, policy_name, True)
-        return "未知 action，可选: user_info, usage_fee, policies, audit_events[:N], instance_network:<OCID>, create_safe_policy, delete_policy:<名称>"
+        return "未知 action，可选: user_info, usage_fee, policies, audit_events[:N], instance_info:<OCID>, create_safe_policy, delete_policy:<名称>"
 
     def handle_callback_query(self, callback_query: Dict[str, Any]) -> None:
         callback_query_id = str(callback_query.get("id", ""))
@@ -3090,11 +3256,10 @@ def main() -> None:
     ae.add_argument("--sort-by", default="timestamp", help="排序字段（默认 timestamp）")
     ae.add_argument("--sort-order", choices=["ASCENDING", "DESCENDING"], default="DESCENDING", help="排序方向")
 
-    inet = sub.add_parser("instance-network", help="查询实例网络安全总览")
-    inet.add_argument("instance_id", help="实例 OCID")
+    iinfo = sub.add_parser("instance-info", help="查询所有实例详细信息")
 
     runp = sub.add_parser("run", help="兼容旧版：运行预设动作")
-    runp.add_argument("action", help="user_info|usage_fee|policies|audit_events[:N]|instance_network:<OCID>|create_safe_policy|delete_policy:<名称>")
+    runp.add_argument("action", help="user_info|usage_fee|policies|audit_events[:N]|instance_info:<OCID>|create_safe_policy|delete_policy:<名称>")
 
     args = parser.parse_args()
 
@@ -3125,8 +3290,8 @@ def main() -> None:
             sort_by=args.sort_by,
             sort_order=args.sort_order
         )
-    if args.cmd == "instance-network":
-        return show_instance_network(app_config, instance_id=args.instance_id)
+    if args.cmd == "instance-info":
+        return show_instance_info(app_config)
 
     if args.cmd == "security-list-add-ingress":
         return add_security_list_ingress_rule(
@@ -3204,14 +3369,14 @@ def main() -> None:
             return export_usage_fee(app_config)
         if action == "policies":
             return list_policies(app_config)
-        if action.startswith("instance_network:"):
-            return show_instance_network(app_config, instance_id=action.split(":", 1)[1].strip())
+        if action.startswith("instance_info:"):
+            return show_instance_info(app_config, instance_id=action.split(":", 1)[1].strip())
 
         if action == "create_safe_policy":
             return create_safe_policy(app_config, auto_approve=True)
         if action.startswith("delete_policy:"):
             return delete_policy(app_config, target_name=action.split(":", 1)[1].strip(), auto_approve=True)
-        raise ValueError("不支持的 action。可选: user_info, usage_fee, policies, audit_events[:N], instance_network:<OCID>, create_safe_policy, delete_policy:<名称>")
+        raise ValueError("不支持的 action。可选: user_info, usage_fee, policies, audit_events[:N], instance_info:<OCID>, create_safe_policy, delete_policy:<名称>")
 
 
 if __name__ == "__main__":

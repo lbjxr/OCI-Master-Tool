@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.5.0] - 2026-04-07
+
+### ✨ 新增功能
+- **实例信息总览** (`/instance_info`)
+  - 查询所有实例的详细信息
+  - 显示 CPU (`ocpus`)、内存 (`memory_in_gbs`)、存储 (`boot_volume_size_gb`)
+  - 显示实例状态（运行中/已停止/已终止）
+  - 显示区域 (`region`)
+  - 自动获取实际启动卷大小（不再使用默认值）
+
+### 🎭 用户体验优化
+- **Telegram 格式化**：
+  - 状态图标：✅ 运行中 / 🛑 已停止 / ❌ 已终止 / ⏳ 其他
+  - 信息卡片布局，适配移动端
+  - OCID 简化显示（只显示后 16 位 + ...）
+  - 分隔线优化，提升可读性
+- **命令更名**：`instance_network` → `instance_info`
+
+### 🐛 Bug 修复
+- 修复重复函数名冲突（`render_instance_info_telegram`）
+- 修复启动卷大小获取逻辑，现可正确显示实际存储空间
+- 添加详细日志，方便排查问题
+
+### 📝 文档更新
+- 更新 README 主要功能列表
+- 更新命令帮助文本
+
+---
+
 ## [v1.4.0] - 2026-04-06
 
 ### ✨ 新增功能
