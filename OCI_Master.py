@@ -3227,23 +3227,6 @@ class TelegramBotRunner:
 # ==========================================
 # 5. 主程序菜单与入口
 # ==========================================
-def print_cli_menu() -> None:
-    print("\n" + "☁️  OCI 甲骨文云一键运维工具 ☁️ ".center(50))
-    print("=" * 62)
-    print("  1. 👤 查看当前用户详细信息")
-    print("  2. 💰 导出本月费用账单 (CSV)")
-    print("  3. 🛡️  查询当前密码策略看板")
-    print("  4. 📋 查询审计事件日志")
-    print("  5. 🔥 查询网络防火墙策略列表")
-    print("  6. 🧱 查询网络防火墙实例列表")
-    print("  7. 🔒 创建/修复永不过期安全策略")
-    print("  8. 🗑️  删除冗余密码策略")
-    print("  9. 🤖 启动 Telegram Bot 轮询")
-    print("  0. 🚪 退出程序")
-    print("=" * 62)
-
-
-
     def handle_policy_menu_callback(self, chat_id: int, message_id: int, data: str, app_config: Dict[str, Any]) -> None:
         """处理策略菜单回调"""
         from telegram.menus.policy_menu import build_inline_keyboard
@@ -3274,13 +3257,13 @@ def print_cli_menu() -> None:
                     state = get_pm_state(chat_id)
                     policy_name = state.get("policy_name", "")
                     if not policy_name:
-                        return self.send_message_simple(str(chat_id), "❌ 会话已过期，请重新开始")
+                        return self.send_message(str(chat_id), "❌ 会话已过期，请重新开始")
                     
                     if len(parts) > 3 and parts[3] == "custom":
                         # 等待用户输入自定义天数
                         state["step"] = "create_wait_custom_days"
                         set_pm_state(chat_id, state)
-                        return self.send_message_simple(str(chat_id), "请输入自定义过期天数（0-36500）：")
+                        return self.send_message(str(chat_id), "请输入自定义过期天数（0-36500）：")
                     else:
                         # 选择了预设天数
                         days = int(parts[3])
@@ -3340,11 +3323,28 @@ def print_cli_menu() -> None:
                     return self.edit_message_text(chat_id=str(chat_id), message_id=message_id, text=result_text, parse_mode="HTML", reply_markup=keyboard)
             
             else:
-                return self.send_message_simple(str(chat_id), f"❌ 未知操作: {data}")
+                return self.send_message(str(chat_id), f"❌ 未知操作: {data}")
         
         except Exception as e:
             LOGGER.exception("处理策略菜单回调失败")
-            return self.send_message_simple(str(chat_id), f"❌ 处理失败: {str(e)[:200]}")
+            return self.send_message(str(chat_id), f"❌ 处理失败: {str(e)[:200]}")
+
+def print_cli_menu() -> None:
+    print("\n" + "☁️  OCI 甲骨文云一键运维工具 ☁️ ".center(50))
+    print("=" * 62)
+    print("  1. 👤 查看当前用户详细信息")
+    print("  2. 💰 导出本月费用账单 (CSV)")
+    print("  3. 🛡️  查询当前密码策略看板")
+    print("  4. 📋 查询审计事件日志")
+    print("  5. 🔥 查询网络防火墙策略列表")
+    print("  6. 🧱 查询网络防火墙实例列表")
+    print("  7. 🔒 创建/修复永不过期安全策略")
+    print("  8. 🗑️  删除冗余密码策略")
+    print("  9. 🤖 启动 Telegram Bot 轮询")
+    print("  0. 🚪 退出程序")
+    print("=" * 62)
+
+
 
 def main_menu(app_config: Dict[str, Any]) -> None:
     clear_cmd = "cls" if os.name == "nt" else "clear"
