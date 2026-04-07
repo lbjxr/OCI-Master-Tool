@@ -2687,34 +2687,6 @@ class TelegramBotRunner:
         if not normalized:
             return "未收到命令内容。"
 
-
-        # Policy Menu 状态处理（用户输入策略名称或天数）
-        pm_state = get_pm_state(chat_id) if hasattr(self, 'chat_id') else {}
-        pm_step = pm_state.get("step", "")
-        
-        if pm_step == "create_wait_name":
-            # 用户输入了策略名称
-            is_valid, error_msg = validate_policy_name(normalized)
-            if not is_valid:
-                return f"❌ {error_msg}\n\n请重新输入有效的策略名称："
-            
-            # 进入步骤2：选择过期天数
-            text, keyboard = render_pm_create_step2(chat_id, normalized)
-            return self.send_message_with_keyboard(self.chat_id, text, keyboard)
-        
-        elif pm_step == "create_wait_custom_days":
-            # 用户输入了自定义天数
-            is_valid, days, error_msg = validate_expires_days(normalized)
-            if not is_valid:
-                return f"❌ {error_msg}\n\n请重新输入有效的天数（0-36500）："
-            
-            policy_name = pm_state.get("policy_name", "")
-            text, keyboard = render_pm_create_confirm(chat_id, policy_name, days)
-            return self.send_message_with_keyboard(self.chat_id, text, keyboard)
-        
-        if normalized.startswith("/sl_menu"):
-            return "<b>🧭 安全列表管理菜单</b>\n请选择要执行的操作："
-        if normalized.startswith("/start"):
             return "欢迎使用 OCI Master Telegram Bot。\n" + self.build_help_text()
         if normalized.startswith("/help") or normalized.startswith("/menu"):
             return self.build_help_text()
@@ -2788,13 +2760,6 @@ class TelegramBotRunner:
             except Exception as e:
                 LOGGER.exception("查询实例信息总览失败")
                 return f"❌ 查询失败: {str(e)[:200]}"
-        if normalized.startswith("/policy_menu"):
-            try:
-                text, keyboard = render_pm_home()
-                return self.send_message_with_keyboard(chat_id, text, keyboard)
-            except Exception as e:
-                LOGGER.exception("打开策略菜单失败")
-                return f"❌ 打开失败: {str(e)[:200]}"
         if normalized.startswith("/create_safe_policy"):
             return capture_output(create_safe_policy, self.app_config, True)
         if normalized.startswith("/delete_policy"):
