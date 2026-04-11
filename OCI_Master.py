@@ -173,6 +173,28 @@ def format_bool(value: Any) -> str:
     return str(value)
 
 
+def format_datetime_compact(value: Any) -> str:
+    """将 ISO 时间或 datetime 紧凑格式化为 YYYY-MM-DD HH:MM:SS UTC。"""
+    if value in (None, "N/A", ""):
+        return "N/A"
+
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        try:
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            dt = datetime.fromisoformat(text)
+        except Exception:
+            return str(value)
+
+    if dt.tzinfo is None:
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
 def load_app_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """加载应用配置文件，用于 OCI 读取参数、策略参数、Telegram Bot 参数。"""
     target_path = config_path or os.environ.get("OCI_MASTER_APP_CONFIG") or DEFAULT_APP_CONFIG_PATH
@@ -369,6 +391,7 @@ def print_basic_identity_info(user_data: Dict[str, Any]) -> None:
     print_kv("用户 OCID", safe_get(user_data, 'ocid', safe_get(user_data, 'id')))
     print_kv("Active", format_bool(safe_get(user_data, 'active')))
     print_kv("用户类型", safe_get_any(user_data, 'user_type', 'userType'))
+    print_kv("创建时间", format_datetime_compact(safe_get_any(safe_get(user_data, 'meta', {}), 'created', 'creation_date', 'creationDate')))
     print_kv("Locale", safe_get(user_data, 'locale'))
     print_kv("Timezone", safe_get(user_data, 'timezone'))
     print_kv("Preferred Language", safe_get_any(user_data, 'preferred_language', 'preferredLanguage'))
@@ -778,6 +801,10 @@ def render_user_info_telegram(user_data: Dict[str, Any]) -> str:
         f"🔑 <b>用户名</b>: <code>{html.escape(str(username))}</code>",
         f"📛 <b>显示名</b>: {html.escape(str(display_name))}",
     ])
+
+    created_at = format_datetime_compact(safe_get_any(safe_get(user_data, 'meta', {}), 'created', 'creation_date', 'creationDate'))
+    if str(created_at) != "N/A":
+        parts.append(f"🕒 <b>创建时间</b>: <code>{html.escape(str(created_at))}</code>")
     
     if str(description) != "N/A":
         parts.append(f"📝 <b>描述/全名</b>: {html.escape(str(description))}")
