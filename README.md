@@ -64,6 +64,11 @@ pip install -r requirements.txt  # 若无此文件,可执行: pip install oci re
 ```bash
 python3 OCI_Master.py
 ```
+- 直接命令(非交互):
+```bash
+python3 OCI_Master.py region-subscriptions
+python3 OCI_Master.py run region_subscriptions
+```
 - 菜单示例:
 ```plaintext
   1. 👤 查看当前用户信息
@@ -144,6 +149,7 @@ sudo systemctl --no-pager -l status oci-master-telegram.service
 
 #### 命令列表
 - 👤 `/user_info` - 用户账号信息(基础/联系方式/权限/安全状态)
+- 🌏 `/regions` - 查询当前租户订阅区域(含 Home Region 标记)
 - 💰 `/usage_fee` - 本月费用账单(按日汇总 + 服务明细)
 - 🛡️ `/policies` - 密码策略看板(按优先级、当前生效高亮)
 - 🧱 `/instance_network <instance_ocid>` - 实例网络安全总览(VNIC / NSG / Security Lists)
