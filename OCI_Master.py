@@ -2002,6 +2002,99 @@ def render_instance_candidates_telegram(instances: List[Any]) -> str:
     return render_instance_info_telegram(simple_list)
 
 
+def _parse_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "y", "on"}
+
+
+def get_region_subscriptions_data(app_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """查询当前租户已订阅的 OCI 区域列表。"""
+    app_config = app_config or load_app_config()
+    config = get_oci_config(app_config)
+    identity_client = oci.identity.IdentityClient(config)
+    response = identity_client.list_region_subscriptions(config["tenancy"])
+    subscriptions = _normalize_collection_items(getattr(response, "data", None))
+
+    regions: List[Dict[str, Any]] = []
+    for item in subscriptions:
+        regions.append(
+            {
+                "region_name": str(safe_get(item, "region_name", "N/A")),
+                "region_key": str(safe_get(item, "region_key", "N/A")),
+                "status": str(safe_get(item, "status", "UNKNOWN")).upper(),
+                "is_home_region": _parse_bool(safe_get(item, "is_home_region", False)),
+            }
+        )
+
+    regions.sort(key=lambda x: (not x["is_home_region"], x["region_name"]))
+    home_region = next((r["region_name"] for r in regions if r["is_home_region"]), config.get("region", "N/A"))
+    return {
+        "home_region": str(home_region),
+        "total_regions": len(regions),
+        "regions": regions,
+    }
+
+
+def render_region_subscriptions_telegram(data: Dict[str, Any]) -> str:
+    """渲染订阅区域列表（紧凑、移动端友好）。"""
+    regions = data.get("regions") or []
+    if not regions:
+        return "📭 <b>未查询到订阅区域</b>"
+
+    lines = [
+        "<b>🌏 OCI 订阅区域</b>",
+        f"📌 Home Region: <code>{html.escape(str(data.get('home_region', 'N/A')))}</code>",
+        f"📈 已订阅: <code>{int(data.get('total_regions', len(regions)))}</code> 个",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    for idx, region in enumerate(regions, 1):
+        name = html.escape(str(region.get("region_name", "N/A")))
+        key = html.escape(str(region.get("region_key", "N/A")))
+        status = html.escape(str(region.get("status", "UNKNOWN")))
+        is_home = bool(region.get("is_home_region"))
+        status_icon = "✅" if status == "READY" else ("⏳" if status in {"IN_PROGRESS", "CREATING"} else "⚠️")
+        home_tag = "  🏠 <b>HOME</b>" if is_home else ""
+        lines.append(f"{idx}. <b>{name}</b>{home_tag}")
+        lines.append(f"   <code>{key}</code>  {status_icon} <code>{status}</code>")
+
+    return "\n".join(lines)
+
+
+def render_region_subscriptions_cli(data: Dict[str, Any]) -> str:
+    """CLI 视图：查询当前租户订阅区域。"""
+    regions = data.get("regions") or []
+    if not regions:
+        return "📭 未查询到订阅区域"
+
+    lines = [
+        "🌏 OCI 订阅区域",
+        f"Home Region: {data.get('home_region', 'N/A')}",
+        f"已订阅: {int(data.get('total_regions', len(regions)))} 个",
+        "-" * 48,
+    ]
+    for idx, region in enumerate(regions, 1):
+        home_tag = " [HOME]" if region.get("is_home_region") else ""
+        lines.append(
+            f"{idx}. {region.get('region_name', 'N/A')}{home_tag} | {region.get('region_key', 'N/A')} | {region.get('status', 'UNKNOWN')}"
+        )
+    return "\n".join(lines)
+
+
+def show_region_subscriptions(app_config: Optional[Dict[str, Any]] = None) -> None:
+    """功能：查询当前租户订阅区域。"""
+    print("\n" + "=" * 65)
+    print("🌏 正在查询 OCI 订阅区域...")
+    try:
+        data = get_region_subscriptions_data(app_config or load_app_config())
+        print(render_region_subscriptions_cli(data))
+    except Exception as e:
+        LOGGER.exception("查询订阅区域失败")
+        print(f"❌ 查询失败: {e}")
+
+
 def render_security_list_candidates_telegram(candidates: List[Any]) -> str:
     if not candidates:
         return "📭 <b>未找到可用 Security List</b>"
@@ -2286,6 +2379,7 @@ class TelegramBotRunner:
             {"command": "start", "description": "查看欢迎信息"},
             {"command": "menu", "description": "显示命令菜单"},
             {"command": "user_info", "description": "查看当前用户详细信息"},
+            {"command": "regions", "description": "查询订阅区域"},
             {"command": "usage_fee", "description": "查询本月费用账单"},
             {"command": "audit_events", "description": "查询审计事件日志"},
             {"command": "instance_info", "description": "查询实例信息总览"},
@@ -2319,6 +2413,7 @@ class TelegramBotRunner:
             "<b>🤖 OCI Master Bot 命令菜单</b>\n\n"
             "<b>📊 查询命令</b>\n"
             "👤 /user_info - 查看用户账号信息\n"
+            "🌏 /regions - 查询订阅区域\n"
             "💰 /usage_fee - 本月费用账单\n"
             "📋 /audit_events - 审计事件日志\n"
             "🖥️ /instance_info - 查询所有实例详细信息\n"
@@ -2662,6 +2757,12 @@ class TelegramBotRunner:
                 return render_user_info_telegram(domain_user)
             except Exception as e:
                 return f"❌ 查询失败: {str(e)[:200]}"
+        if normalized.startswith("/regions") or normalized.startswith("/region_subscriptions"):
+            try:
+                data = get_region_subscriptions_data(self.app_config)
+                return render_region_subscriptions_telegram(data)
+            except Exception as e:
+                return f"❌ 查询失败: {str(e)[:200]}"
         if normalized.startswith("/usage_fee"):
             report_data = get_usage_fee_report_data(self.app_config)
             return render_usage_fee_telegram(report_data, show_all=False)
@@ -2716,6 +2817,9 @@ class TelegramBotRunner:
     def handle_run_action(self, action: str) -> str:
         if action == "user_info":
             return capture_output(get_user_info, self.app_config)
+        if action == "region_subscriptions":
+            data = get_region_subscriptions_data(self.app_config)
+            return render_region_subscriptions_telegram(data)
         if action == "usage_fee":
             report_data = get_usage_fee_report_data(self.app_config)
             return render_usage_fee_telegram(report_data, show_all=False)
@@ -2730,7 +2834,7 @@ class TelegramBotRunner:
             return capture_output(list_audit_events, self.app_config, limit)
         if action.startswith("instance_info:"):
             return capture_output(show_instance_info, self.app_config, action.split(":", 1)[1].strip())
-        return "未知 action，可选: user_info, usage_fee, policies, audit_events[:N], instance_info:<OCID>"
+        return "未知 action，可选: user_info, region_subscriptions, usage_fee, policies, audit_events[:N], instance_info:<OCID>"
 
     def handle_callback_query(self, callback_query: Dict[str, Any]) -> None:
         callback_query_id = str(callback_query.get("id", ""))
@@ -3323,6 +3427,7 @@ def main() -> None:
     sub.add_parser("telegram", help="启动 Telegram Bot 轮询")
 
     sub.add_parser("user-info", help="查看当前用户详细信息")
+    sub.add_parser("region-subscriptions", help="查询当前租户订阅区域")
 
     uf = sub.add_parser("usage-fee", help="查询本月费用账单")
     uf.add_argument("--show-all", action="store_true", help="展示全部日期，不折叠")
@@ -3337,7 +3442,10 @@ def main() -> None:
     iinfo = sub.add_parser("instance-info", help="查询所有实例详细信息")
 
     runp = sub.add_parser("run", help="兼容旧版：运行预设动作")
-    runp.add_argument("action", help="user_info|usage_fee|policies|audit_events[:N]|instance_info:<OCID>|create_safe_policy|delete_policy:<名称>")
+    runp.add_argument(
+        "action",
+        help="user_info|region_subscriptions|usage_fee|policies|audit_events[:N]|instance_info:<OCID>|create_safe_policy|delete_policy:<名称>",
+    )
 
     args = parser.parse_args()
 
@@ -3351,6 +3459,8 @@ def main() -> None:
         return TelegramBotRunner(app_config).run_polling()
     if args.cmd == "user-info":
         return get_user_info(app_config)
+    if args.cmd == "region-subscriptions":
+        return show_region_subscriptions(app_config)
     if args.cmd == "usage-fee":
         try:
             export_usage_fee(app_config, show_all=args.show_all, csv_out=args.csv_out)
@@ -3441,6 +3551,8 @@ def main() -> None:
         action = args.action
         if action == "user_info":
             return get_user_info(app_config)
+        if action == "region_subscriptions":
+            return show_region_subscriptions(app_config)
         if action == "usage_fee":
             return export_usage_fee(app_config)
         if action.startswith("instance_info:"):
@@ -3450,7 +3562,9 @@ def main() -> None:
             return create_safe_policy(app_config, auto_approve=True)
         if action.startswith("delete_policy:"):
             return delete_policy(app_config, target_name=action.split(":", 1)[1].strip(), auto_approve=True)
-        raise ValueError("不支持的 action。可选: user_info, usage_fee, policies, audit_events[:N], instance_info:<OCID>, create_safe_policy, delete_policy:<名称>")
+        raise ValueError(
+            "不支持的 action。可选: user_info, region_subscriptions, usage_fee, policies, audit_events[:N], instance_info:<OCID>, create_safe_policy, delete_policy:<名称>"
+        )
 
 
 if __name__ == "__main__":
