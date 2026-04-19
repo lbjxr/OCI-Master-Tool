@@ -110,13 +110,45 @@ python3 OCI_Master.py telegram
 - 获取 ID:可使用 @userinfobot(user_id)与 @getidsbot(chat_id)
 
 #### systemd 服务部署(推荐)
-- 最简服务示例(推荐使用 EnvironmentFile):
+- 下面示例中的 `/opt/oci-master-tool` 只是**示例安装路径**。请先把仓库 clone 到你自己的部署目录，再把 `WorkingDirectory` 和 `ExecStart` 改成对应实际路径。
+- 通用准备步骤(脚本化/手动两种方式都适用):
 ```bash
-# 环境文件(更安全)
+# 1) 选择部署目录(示例)
+sudo mkdir -p /opt/oci-master-tool
+sudo chown "$USER":"$USER" /opt/oci-master-tool
+git clone https://github.com/lbjxr/OCI-Master-Tool.git /opt/oci-master-tool
+cd /opt/oci-master-tool
+python3 -m pip install -r requirements.txt
+
+# 2) 环境文件(更安全)
 echo 'OCI_MASTER_BOT_TOKEN=你的_token' | sudo tee /etc/oci-master.env
 sudo chmod 600 /etc/oci-master.env
+```
 
-# 服务单元
+##### 脚本化初始化(推荐)
+- 项目已提供 `scripts/setup_systemd.sh`，会按与手动方式一致的内容生成 service 文件。
+- 脚本特性:
+  - 生成前会检查 `OCI_Master.py` 是否存在
+  - 如果目标 service 已存在，会先自动备份
+  - Telegram token 不写入 service 文件，只通过 `EnvironmentFile` 注入
+- 推荐用法:
+```bash
+chmod +x scripts/setup_systemd.sh
+sudo ./scripts/setup_systemd.sh \
+  --install-dir /opt/oci-master-tool \
+  --config-path /root/oci_master_config.json \
+  --service-name oci-master-telegram \
+  --user root \
+  --env-file /etc/oci-master.env \
+  --enable-now
+
+sudo systemctl --no-pager -l status oci-master-telegram.service
+```
+- 如只想先预览/生成而不触发 `systemctl`，可追加 `--dry-run`。
+
+##### 手动初始化
+- 最简服务示例(推荐使用 EnvironmentFile):
+```bash
 sudo tee /etc/systemd/system/oci-master-telegram.service >/dev/null <<'EOF'
 [Unit]
 Description=OCI Master Telegram runner
@@ -125,10 +157,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/root/.openclaw/workspace/tmp/OCI-Master-Tool
+WorkingDirectory=/opt/oci-master-tool
 Environment=OCI_MASTER_APP_CONFIG=/root/oci_master_config.json
 EnvironmentFile=/etc/oci-master.env
-ExecStart=/usr/bin/python3 /root/.openclaw/workspace/tmp/OCI-Master-Tool/OCI_Master.py telegram
+ExecStart=/usr/bin/python3 /opt/oci-master-tool/OCI_Master.py telegram
 Restart=always
 RestartSec=5s
 KillSignal=SIGTERM
@@ -141,11 +173,13 @@ User=root
 WantedBy=multi-user.target
 EOF
 
-# 生效并启动
 sudo systemctl daemon-reload
 sudo systemctl enable --now oci-master-telegram.service
 sudo systemctl --no-pager -l status oci-master-telegram.service
 ```
+- 如果你的仓库不在 `/opt/oci-master-tool`，请同步修改这两项:
+  - `WorkingDirectory=/你的实际项目目录`
+  - `ExecStart=/usr/bin/python3 /你的实际项目目录/OCI_Master.py telegram`
 
 #### 命令列表
 - 👤 `/user_info` - 用户账号信息(基础/联系方式/权限/安全状态)
