@@ -110,29 +110,36 @@ python3 OCI_Master.py telegram
 - 获取 ID:可使用 @userinfobot(user_id)与 @getidsbot(chat_id)
 
 #### systemd 服务部署(推荐)
-- 下面示例中的 `/opt/oci-master-tool` 只是**示例安装路径**。请先把仓库 clone 到你自己的部署目录，再把 `WorkingDirectory` 和 `ExecStart` 改成对应实际路径。
-- 通用准备步骤(脚本化/手动两种方式都适用):
+- 下面示例中的 `/opt/oci-master-tool` 只是**示例安装路径**。请先把仓库 clone 到你自己的部署目录，再把文中的项目路径替换成你的实际路径。
+- 下面统一使用这组示例值：
+  - 项目目录：`/opt/oci-master-tool`
+  - 配置文件：`/root/oci_master_config.json`
+  - 环境文件：`/etc/oci-master.env`
+  - 服务名：`oci-master-telegram`
+
+##### 前置准备(所有部署方式共用)
 ```bash
-# 1) 选择部署目录(示例)
+# 1) 获取代码并安装依赖
 sudo mkdir -p /opt/oci-master-tool
 sudo chown "$USER":"$USER" /opt/oci-master-tool
 git clone https://github.com/lbjxr/OCI-Master-Tool.git /opt/oci-master-tool
 cd /opt/oci-master-tool
 python3 -m pip install -r requirements.txt
 
-# 2) 环境文件(更安全)
+# 2) 写入 Telegram Bot Token
 echo 'OCI_MASTER_BOT_TOKEN=你的_token' | sudo tee /etc/oci-master.env
 sudo chmod 600 /etc/oci-master.env
 ```
 
-##### 脚本化初始化(推荐)
-- 项目已提供 `scripts/setup_systemd.sh`，会按与手动方式一致的内容生成 service 文件。
-- 脚本特性:
-  - 生成前会检查 `OCI_Master.py` 是否存在
+##### 方式一：脚本化初始化(推荐)
+- 项目已提供 `scripts/setup_systemd.sh`，会生成与手动方式一致的 service 文件。
+- 脚本特性：
+  - 生成前检查 `OCI_Master.py` 是否存在
   - 如果目标 service 已存在，会先自动备份
   - Telegram token 不写入 service 文件，只通过 `EnvironmentFile` 注入
-- 推荐用法:
+- 用法：
 ```bash
+cd /opt/oci-master-tool
 chmod +x scripts/setup_systemd.sh
 sudo ./scripts/setup_systemd.sh \
   --install-dir /opt/oci-master-tool \
@@ -141,13 +148,9 @@ sudo ./scripts/setup_systemd.sh \
   --user root \
   --env-file /etc/oci-master.env \
   --enable-now
-
-sudo systemctl --no-pager -l status oci-master-telegram.service
 ```
-- 如只想先预览/生成而不触发 `systemctl`，可追加 `--dry-run`。
 
-##### 手动初始化
-- 最简服务示例(推荐使用 EnvironmentFile):
+##### 方式二：手动写入 service 文件
 ```bash
 sudo tee /etc/systemd/system/oci-master-telegram.service >/dev/null <<'EOF'
 [Unit]
@@ -172,26 +175,28 @@ User=root
 [Install]
 WantedBy=multi-user.target
 EOF
+```
 
+##### 启用与验证(所有部署方式共用)
+```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now oci-master-telegram.service
 sudo systemctl --no-pager -l status oci-master-telegram.service
 ```
-- 如果你的仓库不在 `/opt/oci-master-tool`，请同步修改这两项:
+- 如只想先生成而不触发 `systemctl`，脚本方式可追加 `--dry-run`。
+- 如果你的仓库不在 `/opt/oci-master-tool`，请至少同步修改这两项：
   - `WorkingDirectory=/你的实际项目目录`
   - `ExecStart=/usr/bin/python3 /你的实际项目目录/OCI_Master.py telegram`
 
 #### 命令列表
+- 👋 `/start` - 显示欢迎信息，并提示使用 `/menu`
+- 💬 `/menu` - 显示当前可用命令菜单
 - 👤 `/user_info` - 用户账号信息(基础/联系方式/权限/安全状态)
-- 🌏 `/regions` - 查询当前租户订阅区域(含 Home Region 标记)
 - 💰 `/usage_fee` - 本月费用账单(按日汇总 + 服务明细)
-- 🛡️ `/policies` - 密码策略看板(按优先级、当前生效高亮)
-- 🧱 `/instance_network <instance_ocid>` - 实例网络安全总览(VNIC / NSG / Security Lists)
-- 🛡️ `/nsg_rules <nsg_ocid>` - NSG 规则查询
-- 📋 `/sl_rules <security_list_ocid>` - Security List 规则查询
-- 🔒 `/create_safe_policy` - 创建永不过期策略
-- 🗑️ `/delete_policy <名称>` - 删除指定策略
-- 💬 `/help` - 分类帮助菜单
+- 📋 `/audit_events [数量]` - 查询审计事件日志，默认最近 10 条
+- 🖥️ `/instance_info` - 查询实例信息总览
+- 🔐 `/policy_menu` - 密码策略菜单管理
+- 🔥 `/sl_menu` - 网络防火墙配置
 
 > 说明:机器人自动使用 HTML 渲染(parse_mode=HTML),无需额外配置。
 
