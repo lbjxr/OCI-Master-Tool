@@ -111,6 +111,19 @@ python3 OCI_Master.py telegram
 
 #### systemd 服务部署(推荐)
 - 下面示例中的 `/opt/oci-master-tool` 只是**示例安装路径**。请先把仓库 clone 到你自己的部署目录，再把 `WorkingDirectory` 和 `ExecStart` 改成对应实际路径。
+- 通用准备步骤(脚本化/手动两种方式都适用):
+```bash
+# 1) 选择部署目录(示例)
+sudo mkdir -p /opt/oci-master-tool
+sudo chown "$USER":"$USER" /opt/oci-master-tool
+git clone https://github.com/lbjxr/OCI-Master-Tool.git /opt/oci-master-tool
+cd /opt/oci-master-tool
+python3 -m pip install -r requirements.txt
+
+# 2) 环境文件(更安全)
+echo 'OCI_MASTER_BOT_TOKEN=你的_token' | sudo tee /etc/oci-master.env
+sudo chmod 600 /etc/oci-master.env
+```
 
 ##### 脚本化初始化(推荐)
 - 项目已提供 `scripts/setup_systemd.sh`，会按与手动方式一致的内容生成 service 文件。
@@ -120,19 +133,7 @@ python3 OCI_Master.py telegram
   - Telegram token 不写入 service 文件，只通过 `EnvironmentFile` 注入
 - 推荐用法:
 ```bash
-# 1) 选择部署目录(示例)
-sudo mkdir -p /opt/oci-master-tool
-sudo chown "$USER":"$USER" /opt/oci-master-tool
-git clone https://github.com/lbjxr/OCI-Master-Tool.git /opt/oci-master-tool
-cd /opt/oci-master-tool
-python3 -m pip install -r requirements.txt
 chmod +x scripts/setup_systemd.sh
-
-# 2) 环境文件(更安全)
-echo 'OCI_MASTER_BOT_TOKEN=你的_token' | sudo tee /etc/oci-master.env
-sudo chmod 600 /etc/oci-master.env
-
-# 3) 生成 service 并立即启用
 sudo ./scripts/setup_systemd.sh \
   --install-dir /opt/oci-master-tool \
   --config-path /root/oci_master_config.json \
@@ -141,7 +142,6 @@ sudo ./scripts/setup_systemd.sh \
   --env-file /etc/oci-master.env \
   --enable-now
 
-# 4) 查看状态
 sudo systemctl --no-pager -l status oci-master-telegram.service
 ```
 - 如只想先预览/生成而不触发 `systemctl`，可追加 `--dry-run`。
@@ -149,18 +149,6 @@ sudo systemctl --no-pager -l status oci-master-telegram.service
 ##### 手动初始化
 - 最简服务示例(推荐使用 EnvironmentFile):
 ```bash
-# 1) 选择部署目录(示例)
-sudo mkdir -p /opt/oci-master-tool
-sudo chown "$USER":"$USER" /opt/oci-master-tool
-git clone https://github.com/lbjxr/OCI-Master-Tool.git /opt/oci-master-tool
-cd /opt/oci-master-tool
-python3 -m pip install -r requirements.txt
-
-# 2) 环境文件(更安全)
-echo 'OCI_MASTER_BOT_TOKEN=你的_token' | sudo tee /etc/oci-master.env
-sudo chmod 600 /etc/oci-master.env
-
-# 3) 服务单元
 sudo tee /etc/systemd/system/oci-master-telegram.service >/dev/null <<'EOF'
 [Unit]
 Description=OCI Master Telegram runner
@@ -185,7 +173,6 @@ User=root
 WantedBy=multi-user.target
 EOF
 
-# 4) 生效并启动
 sudo systemctl daemon-reload
 sudo systemctl enable --now oci-master-telegram.service
 sudo systemctl --no-pager -l status oci-master-telegram.service

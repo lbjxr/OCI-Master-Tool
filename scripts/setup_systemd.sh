@@ -125,6 +125,11 @@ SERVICE_FILE="$SYSTEMD_DIR/${SERVICE_NAME}.service"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 BACKUP_FILE="${SERVICE_FILE}.bak.${TIMESTAMP}"
 
+if [[ "$DRY_RUN" -eq 0 && "$SYSTEMD_DIR" != "/etc/systemd/system" ]]; then
+  log "警告: 当前将写入非默认 systemd 目录: $SYSTEMD_DIR"
+  log "请确认这是你的预期目录。若只是演练，建议追加 --dry-run"
+fi
+
 mkdir -p "$SYSTEMD_DIR"
 
 if [[ -e "$SERVICE_FILE" ]]; then
