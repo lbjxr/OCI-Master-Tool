@@ -47,7 +47,7 @@ def build_inline_keyboard(rows: List[List[Dict[str, str]]]) -> Dict[str, Any]:
 def render_pm_home() -> Tuple[str, Dict[str, Any]]:
     """渲染策略菜单主页"""
     text = (
-        "<b>━━━ 🔐 密码策略管理 ━━━</b>\n\n"
+        "<b>🔐 密码策略管理</b>\n"
         "请选择操作："
     )
     keyboard = build_inline_keyboard([
@@ -72,9 +72,8 @@ def render_pm_list(app_config: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
             )
             
             parts = [
-                "<b>━━━ 📋 密码策略列表 ━━━</b>",
+                "<b>📋 密码策略列表</b>",
                 f"📊 策略总数: <code>{len(policies)}</code>",
-                "━━━━━━━━━━━━━━━━━━━━━━",
             ]
             
             for i, policy in enumerate(sorted_policies, 1):
@@ -97,9 +96,6 @@ def render_pm_list(app_config: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
                 if is_active:
                     parts.append("✅ <i>当前生效</i>")
                 
-                if i < len(sorted_policies):
-                    parts.append("─────────────────────")
-            
             text = "\n".join(parts)
         
         keyboard = build_inline_keyboard([
@@ -120,7 +116,7 @@ def render_pm_list(app_config: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
 def render_pm_create_step1(chat_id: int) -> Tuple[str, Dict[str, Any]]:
     """渲染创建策略 - 步骤1：输入策略名称"""
     text = (
-        "<b>━━━ ➕ 创建密码策略 - 步骤 1/2 ━━━</b>\n\n"
+        "<b>➕ 创建密码策略 · 步骤 1/2</b>\n\n"
         "请输入策略名称（英文字母、数字、下划线）：\n\n"
         "💡 示例：\n"
         "  • <code>NeverExpirePolicy</code>\n"
@@ -141,7 +137,7 @@ def render_pm_create_step1(chat_id: int) -> Tuple[str, Dict[str, Any]]:
 def render_pm_create_step2(chat_id: int, policy_name: str) -> Tuple[str, Dict[str, Any]]:
     """渲染创建策略 - 步骤2：选择过期天数"""
     text = (
-        f"<b>━━━ ➕ 创建密码策略 - 步骤 2/2 ━━━</b>\n\n"
+        f"<b>➕ 创建密码策略 · 步骤 2/2</b>\n\n"
         f"策略名称: <code>{html.escape(policy_name)}</code>\n\n"
         f"请设置密码过期天数："
     )
@@ -167,7 +163,7 @@ def render_pm_create_confirm(chat_id: int, policy_name: str, expires_days: int) 
     expire_text = "♾️ 永不过期" if expires_days == 0 else f"📅 {expires_days} 天"
     
     text = (
-        f"<b>━━━ ✅ 确认创建策略 ━━━</b>\n\n"
+        f"<b>✅ 确认创建策略</b>\n\n"
         f"策略名称: <code>{html.escape(policy_name)}</code>\n"
         f"密码过期: {expire_text}\n"
         f"优先级: <code>999</code>\n"
@@ -206,8 +202,7 @@ def render_pm_delete_list(app_config: Dict[str, Any]) -> Tuple[str, Dict[str, An
         )
         
         parts = [
-            "<b>━━━ 🗑️ 选择要删除的策略 ━━━</b>",
-            "",
+            "<b>🗑️ 选择要删除的策略</b>",
         ]
         
         rows = []
@@ -230,7 +225,6 @@ def render_pm_delete_list(app_config: Dict[str, Any]) -> Tuple[str, Dict[str, An
             # 添加删除按钮（使用策略名称而非 OCID，避免泄露）
             rows.append([{"text": f"🗑️ 删除 {name}", "callback_data": f"pm:delete:policy:{html.escape(name)}"}])
             parts.append("")
-        
         parts.append("⚠️ 系统保护策略无法删除")
         
         rows.append([{"text": "🏠 返回主菜单", "callback_data": "pm:home"}])
@@ -266,7 +260,7 @@ def render_pm_delete_confirm(policy_name: str, app_config: Dict[str, Any]) -> Tu
         expire_text = "♾️ 永不过期" if str(expires) == "0" else f"📅 {expires} 天"
         
         text = (
-            f"<b>━━━ ⚠️ 删除确认 ━━━</b>\n\n"
+            f"<b>⚠️ 删除确认</b>\n\n"
             f"策略名称: <code>{html.escape(policy_name)}</code>\n"
             f"🎯 优先级: <code>{priority}</code>\n"
             f"⏰ 过期: {expire_text}\n\n"

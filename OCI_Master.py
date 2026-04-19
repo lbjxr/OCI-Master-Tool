@@ -718,7 +718,6 @@ def render_usage_fee_telegram(report_data: Dict[str, Any], show_all: bool = Fals
         "<b>💰 本月费用汇总</b>",
         f"查询区间: <code>{report_data['start_time'].strftime('%Y-%m-%d')} ~ {report_data['end_time'].strftime('%Y-%m-%d')}</code>",
         f"本月预估总计: <b>{report_data['total_cost']:.4f} {html.escape(currency)}</b>",
-        "",
         f"<b>📅 {'全部数据' if show_all else f'最近 {display_days} 天'} ({len(daily_totals)} 天)</b>",
     ]
     
@@ -728,7 +727,8 @@ def render_usage_fee_telegram(report_data: Dict[str, Any], show_all: bool = Fals
         services = daily_services[date_str]
         
         # 日期标题行
-        message_parts.append(f"\n<b>📆 {date_str}</b>")
+        message_parts.append("")
+        message_parts.append(f"<b>📆 {date_str}</b>")
         message_parts.append(f"💵 小计: <code>{total:.4f} {html.escape(currency)}</code>")
         
         # 服务类型对应的 emoji 图标和中文名称
@@ -1130,8 +1130,7 @@ def render_audit_events_telegram(events: List[Any], limit: int = 10) -> str:
     # 审计事件渲染（字段映射已验证）
     
     parts = [
-        f"<b>📋 审计事件 (最近 {min(len(events), limit)} 条)</b>\n",
-        "━━━━━━━━━━━━━━━━━━━━━━"
+        f"<b>📋 审计事件 (最近 {min(len(events), limit)} 条)</b>\n"
     ]
     
     for i, event in enumerate(events[:limit], 1):
@@ -1175,8 +1174,6 @@ def render_audit_events_telegram(events: List[Any], limit: int = 10) -> str:
         parts.append(f"   👤 用户: <code>{html.escape(user_name)}</code>")
         parts.append(f"   🌐 IP: <code>{source_ip}</code>")
         parts.append(f"   🕒 时间: {timestamp}")
-    
-    parts.append("\n━━━━━━━━━━━━━━━━━━━━━━")
     
     if len(events) > limit:
         parts.append(f"\n<i>... 还有 {len(events) - limit} 条事件未显示</i>")
@@ -1762,12 +1759,11 @@ def render_instance_network_telegram(topology: Dict[str, Any]) -> str:
     instance = topology["instance"]
     entries = topology["vnics"]
     parts = [
-        "<b>━━━ 🧱 实例信息总览 ━━━</b>",
+        "<b>🧱 实例信息总览</b>",
         f"🏷️ 实例: <b>{html.escape(str(safe_get(instance, 'display_name')))}</b>",
         f"📌 状态: <code>{html.escape(_translate_lifecycle_state(safe_get(instance, 'lifecycle_state')))}</code>",
         f"🆔 实例 OCID: <code>{html.escape(str(safe_get(instance, 'id')))}</code>",
         f"🌐 网卡数量: <code>{len(entries)}</code>",
-        "━━━━━━━━━━━━━━━━━━━━━━",
     ]
     for idx, entry in enumerate(entries, 1):
         vnic = entry["vnic"]
@@ -1795,7 +1791,6 @@ def render_instance_network_telegram(topology: Dict[str, Any]) -> str:
                 parts.append(f"    <code>{html.escape(str(safe_get(sl, 'id')))}</code>")
         else:
             parts.append("📋 安全列表: <i>(无)</i>")
-        parts.append("─────────────────────")
     return "\n".join(parts)
 
 
@@ -1804,11 +1799,10 @@ def render_security_list_rules_telegram(security_list: Any) -> str:
     ingress = getattr(security_list, "ingress_security_rules", []) or []
     egress = getattr(security_list, "egress_security_rules", []) or []
     parts = [
-        "<b>━━━ 📋 Security List 规则 ━━━</b>",
+        "<b>📋 Security List 规则</b>",
         f"🏷️ 名称: <b>{html.escape(str(safe_get(security_list, 'display_name')))}</b>",
         f"🆔 OCID: <code>{html.escape(str(safe_get(security_list, 'id')))}</code>",
         f"📥 入站: <code>{len(ingress)}</code>    📤 出站: <code>{len(egress)}</code>",
-        "━━━━━━━━━━━━━━━━━━━━━━",
     ]
     if ingress:
         parts.append("<b>📥 入站规则</b>")
@@ -1933,9 +1927,8 @@ def render_instance_info_telegram(instances: List[Dict[str, Any]]) -> str:
         return "📭 <b>未找到任何实例</b>"
     
     parts = [
-        "<b>━━━ 🖥️ 实例信息总览 ━━━</b>",
+        "<b>🖥️ 实例信息总览</b>",
         f"📈 实例总数: <code>{len(instances)}</code>",
-        "━━━━━━━━━━━━━━━━━━━━━━",
     ]
     
     for idx, inst in enumerate(instances, 1):
@@ -1978,10 +1971,6 @@ def render_instance_info_telegram(instances: List[Dict[str, Any]]) -> str:
         ocid_short = ocid.split(".")[-1][:16] + "..." if ocid else "N/A"
         parts.append(f"🆔 OCID: <code>{html.escape(ocid_short)}</code>")
         
-        # 分隔线
-        if idx < len(instances):
-            parts.append("──────────────────────")
-    
     return "\n".join(parts)
 
 
@@ -2047,7 +2036,6 @@ def render_region_subscriptions_telegram(data: Dict[str, Any]) -> str:
         "<b>🌏 OCI 订阅区域</b>",
         f"📌 Home Region: <code>{html.escape(str(data.get('home_region', 'N/A')))}</code>",
         f"📈 已订阅: <code>{int(data.get('total_regions', len(regions)))}</code> 个",
-        "━━━━━━━━━━━━━━━━━━━━━━",
     ]
 
     for idx, region in enumerate(regions, 1):
@@ -2099,9 +2087,8 @@ def render_security_list_candidates_telegram(candidates: List[Any]) -> str:
     if not candidates:
         return "📭 <b>未找到可用 Security List</b>"
     parts = [
-        "<b>━━━ 📋 可用 Security List 列表 ━━━</b>",
+        "<b>📋 可用 Security List 列表</b>",
         "💡 直接发送：<code>/sl_rules &lt;security_list_ocid&gt;</code>",
-        "━━━━━━━━━━━━━━━━━━━━━━",
     ]
     for idx, (inst_name, sl) in enumerate(candidates[:20], 1):
         parts.append(f"\n<b>{idx}. {html.escape(str(safe_get(sl, 'display_name')))}</b>")
@@ -2410,18 +2397,17 @@ class TelegramBotRunner:
 
     def build_help_text(self) -> str:
         return (
-            "<b>🤖 OCI Master Bot 命令菜单</b>\n\n"
-            "<b>📊 查询命令</b>\n"
-            "👤 /user_info - 查看用户账号信息\n"
-            "🌏 /regions - 查询订阅区域\n"
-            "💰 /usage_fee - 本月费用账单\n"
-            "📋 /audit_events - 审计事件日志\n"
-            "🖥️ /instance_info - 查询所有实例详细信息\n"
-            "🔐 /policy_menu - 密码策略菜单管理\n"
-            "🧭 /sl_menu - 网络防火墙配置\n\n"
-            "<b>❓ 帮助</b>\n"
+            "<b>🤖 OCI Master 命令菜单</b>\n"
             "👋 /start - 欢迎信息\n"
-            "💬 /menu - 显示此菜单"
+            "💬 /menu - 显示此菜单\n\n"
+            "<b>📊 查询</b>\n"
+            "👤 /user_info - 用户账号信息\n"
+            "💰 /usage_fee - 本月费用账单\n"
+            "📋 /audit_events [数量] - 审计事件日志\n"
+            "🖥️ /instance_info - 实例信息总览\n\n"
+            "<b>🛠️ 管理</b>\n"
+            "🔐 /policy_menu - 密码策略菜单\n"
+            "🔥 /sl_menu - 网络防火墙配置"
         )
 
     def build_usage_fee_keyboard(self, show_all: bool, unique_dates_count: int, display_days: int) -> Optional[Dict[str, Any]]:
@@ -2572,7 +2558,7 @@ class TelegramBotRunner:
         page = max(1, min(page, total_pages))
         start = (page - 1) * page_size
         current = instances[start:start + page_size]
-        lines = ["<b>🧱 选择实例</b>", f"当前操作：{html.escape(self._sl_action_label(action))}", f"页码：<code>{page}/{total_pages}</code>", "━━━━━━━━━━━━━━━━━━━━━━"]
+        lines = ["<b>🧱 选择实例</b>", f"当前操作：{html.escape(self._sl_action_label(action))}", f"页码：<code>{page}/{total_pages}</code>"]
         rows: List[List[Dict[str, str]]] = []
         for inst in current:
             inst_id = str(safe_get(inst, "id"))
@@ -2610,7 +2596,7 @@ class TelegramBotRunner:
     def _render_instance_security_list_page(self, state: Dict[str, Any], instance_id: str, action: Optional[str]) -> Tuple[str, Dict[str, Any]]:
         inst, candidates = self._get_instance_security_list_candidates(instance_id)
         inst_name = str(safe_get(inst, "display_name"))
-        lines = ["<b>📋 选择安全列表</b>", f"实例：<b>{html.escape(inst_name)}</b>", f"当前操作：{html.escape(self._sl_action_label(action))}", "━━━━━━━━━━━━━━━━━━━━━━"]
+        lines = ["<b>📋 选择安全列表</b>", f"实例：<b>{html.escape(inst_name)}</b>", f"当前操作：{html.escape(self._sl_action_label(action))}"]
         rows: List[List[Dict[str, str]]] = []
         instance_token = self._register_sl_token(state, "i", instance_id)
         if not candidates:
@@ -2739,7 +2725,7 @@ class TelegramBotRunner:
         if not normalized:
             return "未收到命令内容。"
         if normalized.startswith("/start"):
-            return "👋 欢迎使用 OCI Master Telegram Bot！\n\n使用 /menu 查看所有可用命令。"
+            return "👋 欢迎使用 OCI Master Telegram Bot！\n使用 /menu 查看可用命令。"
         if normalized.startswith("/help") or normalized.startswith("/menu"):
             return self.build_help_text()
         if normalized.startswith("/user_info"):
@@ -2812,7 +2798,7 @@ class TelegramBotRunner:
             if len(parts) < 2:
                 return "请提供 action，例如：/run user_info"
             return self.handle_run_action(parts[1].strip())
-        return "不支持的命令。\n" + self.build_help_text()
+        return "❓ 不支持的命令\n\n" + self.build_help_text()
 
     def handle_run_action(self, action: str) -> str:
         if action == "user_info":
