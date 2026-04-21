@@ -1251,6 +1251,45 @@ def _fetch_security_list(config: Dict[str, Any], security_list_id: str) -> Any:
     return vcn_client.get_security_list(security_list_id).data
 
 
+def export_security_list_rules(app_config: Optional[Dict[str, Any]], security_list_id: str) -> str:
+    app_config = app_config or load_app_config()
+    config = get_oci_config(app_config)
+    security_list = _fetch_security_list(config, security_list_id)
+
+    backups_dir = Path(BASE_DIR) / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_sl_id = str(security_list_id).replace("ocid1.securitylist.", "").replace(".", "_")
+    backup_path = backups_dir / f"security_list_{safe_sl_id}_{timestamp}.json"
+
+    ingress = [
+        _rule_signature(rule, "ingress")
+        for rule in list(getattr(security_list, "ingress_security_rules", []) or [])
+    ]
+    egress = [
+        _rule_signature(rule, "egress")
+        for rule in list(getattr(security_list, "egress_security_rules", []) or [])
+    ]
+
+    payload = {
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "security_list": {
+            "id": safe_get(security_list, "id", default=security_list_id),
+            "display_name": safe_get(security_list, "display_name", default=""),
+            "compartment_id": safe_get(security_list, "compartment_id", default=""),
+            "vcn_id": safe_get(security_list, "vcn_id", default=""),
+            "ingress_count": len(ingress),
+            "egress_count": len(egress),
+            "ingress_rules": ingress,
+            "egress_rules": egress,
+        },
+    }
+
+    backup_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(backup_path)
+
+
 def _rule_signature(rule: Any, direction: str = "ingress") -> Dict[str, Any]:
     base: Dict[str, Any] = {
         "direction": direction,
@@ -1275,22 +1314,22 @@ def _rule_signature(rule: Any, direction: str = "ingress") -> Dict[str, Any]:
         base["tcp_destination_port_range"] = {
             "min": safe_get(dest, "min", default=None),
             "max": safe_get(dest, "max", default=None),
-        } if dest not in (None, "N/A") else None
+        } if dest is not None and not isinstance(dest, str) else None
         base["tcp_source_port_range"] = {
             "min": safe_get(src, "min", default=None),
             "max": safe_get(src, "max", default=None),
-        } if src not in (None, "N/A") else None
+        } if src is not None and not isinstance(src, str) else None
     if udp_options is not None and not isinstance(udp_options, str):
         dest = safe_get(udp_options, "destination_port_range", default=None)
         src = safe_get(udp_options, "source_port_range", default=None)
         base["udp_destination_port_range"] = {
             "min": safe_get(dest, "min", default=None),
             "max": safe_get(dest, "max", default=None),
-        } if dest not in (None, "N/A") else None
+        } if dest is not None and not isinstance(dest, str) else None
         base["udp_source_port_range"] = {
             "min": safe_get(src, "min", default=None),
             "max": safe_get(src, "max", default=None),
-        } if src not in (None, "N/A") else None
+        } if src is not None and not isinstance(src, str) else None
     if icmp_options is not None and not isinstance(icmp_options, str):
         base["icmp_options"] = {
             "type": safe_get(icmp_options, "type", default=None),
