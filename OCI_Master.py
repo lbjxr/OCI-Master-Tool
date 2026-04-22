@@ -2037,6 +2037,245 @@ def _parse_bool(value: Any) -> bool:
     return text in {"1", "true", "yes", "y", "on"}
 
 
+def format_size_compact(num_bytes: Any) -> str:
+    """将字节数格式化为紧凑可读格式。"""
+    if num_bytes in (None, "N/A", ""):
+        return "N/A"
+    try:
+        value = float(num_bytes)
+    except (TypeError, ValueError):
+        return str(num_bytes)
+
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    index = 0
+    while value >= 1024 and index < len(units) - 1:
+        value /= 1024
+        index += 1
+    if index == 0:
+        return f"{int(value)} {units[index]}"
+    return f"{value:.2f} {units[index]}"
+
+
+def _short_ocid(ocid: Any) -> str:
+    text = str(ocid or "")
+    if not text:
+        return "N/A"
+    if len(text) <= 18:
+        return text
+    return f"{text[:10]}...{text[-6:]}"
+
+
+def _bucket_access_text(public_access_type: Any) -> str:
+    value = str(public_access_type or "NoPublicAccess")
+    mapping = {
+        "NoPublicAccess": "私有",
+        "ObjectRead": "公开读",
+        "ObjectReadWithoutList": "公开读(禁列目录)",
+        "UNKNOWN_ENUM_VALUE": "未知",
+    }
+    return mapping.get(value, value)
+
+
+def _build_compartment_name_map(identity_client: Any, tenancy_id: str) -> Dict[str, str]:
+    compartment_map: Dict[str, str] = {tenancy_id: "租户根目录"}
+    try:
+        response = identity_client.list_compartments(
+            tenancy_id,
+            compartment_id_in_subtree=True,
+            access_level="ACCESSIBLE",
+        )
+        for item in _normalize_collection_items(getattr(response, "data", None)):
+            cid = str(safe_get(item, "id", "")).strip()
+            if not cid:
+                continue
+            compartment_map[cid] = str(safe_get(item, "name", cid))
+    except Exception as exc:
+        LOGGER.warning(f"查询 compartment 列表失败，将仅显示 OCID: {exc}")
+    return compartment_map
+
+
+def _list_all_buckets(object_storage_client: Any, namespace_name: str, compartment_id: str) -> List[Any]:
+    buckets: List[Any] = []
+    page: Optional[str] = None
+    while True:
+        kwargs: Dict[str, Any] = {"limit": 1000}
+        if page:
+            kwargs["page"] = page
+        response = object_storage_client.list_buckets(namespace_name, compartment_id, **kwargs)
+        buckets.extend(_normalize_collection_items(getattr(response, "data", None)))
+        page = safe_get(getattr(response, "headers", {}), "opc-next-page", default=None)
+        if not page:
+            break
+    return buckets
+
+
+def get_bucket_info_data(app_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """查询当前租户/当前 profile 可访问的 Object Storage buckets。"""
+    app_config = app_config or load_app_config()
+    config = get_oci_config(app_config)
+
+    identity_client = oci.identity.IdentityClient(config)
+    object_storage_client = oci.object_storage.ObjectStorageClient(config)
+
+    namespace_name = object_storage_client.get_namespace().data
+    tenancy_id = config["tenancy"]
+    compartment_map = _build_compartment_name_map(identity_client, tenancy_id)
+    accessible_compartment_ids = list(compartment_map.keys())
+
+    bucket_rows: List[Dict[str, Any]] = []
+    for compartment_id in accessible_compartment_ids:
+        try:
+            bucket_summaries = _list_all_buckets(object_storage_client, namespace_name, compartment_id)
+        except Exception as exc:
+            LOGGER.warning(f"列出 Bucket 失败，compartment={compartment_id}: {exc}")
+            continue
+
+        for bucket_summary in bucket_summaries:
+            bucket_name = str(safe_get(bucket_summary, "name", "N/A"))
+            try:
+                detail = object_storage_client.get_bucket(
+                    namespace_name,
+                    bucket_name,
+                    fields=["approximateCount", "approximateSize", "autoTiering"],
+                ).data
+            except Exception as exc:
+                LOGGER.warning(f"获取 Bucket 详情失败，bucket={bucket_name}: {exc}")
+                detail = bucket_summary
+
+            detail_compartment_id = str(safe_get(detail, "compartment_id", compartment_id))
+            bucket_rows.append(
+                {
+                    "name": bucket_name,
+                    "namespace": str(safe_get(detail, "namespace", namespace_name)),
+                    "compartment_id": detail_compartment_id,
+                    "compartment_name": compartment_map.get(detail_compartment_id, _short_ocid(detail_compartment_id)),
+                    "time_created": safe_get(detail, "time_created", safe_get(bucket_summary, "time_created", "N/A")),
+                    "public_access_type": str(safe_get(detail, "public_access_type", "NoPublicAccess")),
+                    "storage_tier": str(safe_get(detail, "storage_tier", "N/A")),
+                    "versioning": str(safe_get(detail, "versioning", "N/A")),
+                    "auto_tiering": str(safe_get(detail, "auto_tiering", "N/A")),
+                    "approximate_count": safe_get(detail, "approximate_count", "N/A"),
+                    "approximate_size": safe_get(detail, "approximate_size", "N/A"),
+                }
+            )
+
+    bucket_rows.sort(key=lambda item: (str(item.get("compartment_name", "")), str(item.get("name", ""))))
+    return {
+        "namespace": str(namespace_name),
+        "profile": str(app_config.get("oci", {}).get("profile_name", "DEFAULT")),
+        "tenancy_id": tenancy_id,
+        "bucket_count": len(bucket_rows),
+        "buckets": bucket_rows,
+        "stats_note": "对象数量与大小来自 get_bucket 的 approximateCount / approximateSize，为 OCI 提供的近似值；若权限不足或接口受限会显示 N/A。",
+    }
+
+
+def render_bucket_info_telegram(data: Dict[str, Any]) -> str:
+    buckets = data.get("buckets") or []
+    namespace = html.escape(str(data.get("namespace", "N/A")))
+    profile = html.escape(str(data.get("profile", "DEFAULT")))
+
+    if not buckets:
+        return (
+            "<b>🪣 存储桶总览</b>\n"
+            "📭 未查询到存储桶\n"
+            f"📦 Namespace: <code>{namespace}</code>\n"
+            f"🪪 Profile: <code>{profile}</code>"
+        )
+
+    lines = [
+        "<b>🪣 存储桶总览</b>",
+        f"📊 Bucket 总数: <code>{int(data.get('bucket_count', len(buckets)))}</code>",
+        f"📦 Namespace: <code>{namespace}</code>",
+        f"🪪 Profile: <code>{profile}</code>",
+    ]
+
+    for idx, bucket in enumerate(buckets, 1):
+        bucket_name = html.escape(str(bucket.get("name", "N/A")))
+        compartment_name = html.escape(str(bucket.get("compartment_name", "N/A")))
+        created_at = html.escape(format_datetime_compact(bucket.get("time_created")))
+        access = html.escape(_bucket_access_text(bucket.get("public_access_type")))
+        tier = html.escape(str(bucket.get("storage_tier", "N/A")))
+        versioning = html.escape(str(bucket.get("versioning", "N/A")))
+        auto_tiering = html.escape(str(bucket.get("auto_tiering", "N/A")))
+        approx_size = html.escape(format_size_compact(bucket.get("approximate_size")))
+        approx_count = html.escape(str(bucket.get("approximate_count", "N/A")))
+
+        lines.extend(
+            [
+                "",
+                f"<b>{idx}. 🪣 {bucket_name}</b>",
+                f"📁 Compartment: <code>{compartment_name}</code>",
+                f"🕒 创建时间: <code>{created_at}</code>",
+                f"🌐 访问: <code>{access}</code> · 🧊 存储层: <code>{tier}</code>",
+                f"🧬 版本控制: <code>{versioning}</code> · 🔄 自动分层: <code>{auto_tiering}</code>",
+                f"📦 对象/容量: <code>{approx_count}</code> 个 · <code>{approx_size}</code>",
+            ]
+        )
+
+    stats_note = str(data.get("stats_note", "")).strip()
+    if stats_note:
+        lines.extend(["", f"<i>ℹ️ {html.escape(stats_note)}</i>"])
+    return "\n".join(lines)
+
+
+def render_bucket_info_cli(data: Dict[str, Any]) -> str:
+    buckets = data.get("buckets") or []
+    if not buckets:
+        return (
+            "📭 未查询到存储桶\n"
+            f"Namespace: {data.get('namespace', 'N/A')}\n"
+            f"Profile: {data.get('profile', 'DEFAULT')}"
+        )
+
+    lines = [
+        "🪣 OCI 存储桶总览",
+        f"Namespace: {data.get('namespace', 'N/A')}",
+        f"Profile: {data.get('profile', 'DEFAULT')}",
+        f"Bucket 数量: {int(data.get('bucket_count', len(buckets)))}",
+        "-" * 64,
+    ]
+
+    for idx, bucket in enumerate(buckets, 1):
+        lines.append(f"{idx}. {bucket.get('name', 'N/A')}")
+        lines.append(f"   compartment : {bucket.get('compartment_name', 'N/A')}")
+        lines.append(f"   created     : {format_datetime_compact(bucket.get('time_created'))}")
+        lines.append(
+            "   access/tier : {access} / {tier}".format(
+                access=_bucket_access_text(bucket.get("public_access_type")),
+                tier=bucket.get("storage_tier", "N/A"),
+            )
+        )
+        lines.append(
+            "   version/at  : {versioning} / {auto_tiering}".format(
+                versioning=bucket.get("versioning", "N/A"),
+                auto_tiering=bucket.get("auto_tiering", "N/A"),
+            )
+        )
+        lines.append(
+            "   approx stat : {size} / {count} objects".format(
+                size=format_size_compact(bucket.get("approximate_size")),
+                count=bucket.get("approximate_count", "N/A"),
+            )
+        )
+
+    lines.append("-" * 64)
+    lines.append(str(data.get("stats_note", "")))
+    return "\n".join(lines)
+
+
+def show_bucket_info(app_config: Optional[Dict[str, Any]] = None) -> None:
+    """功能：查询当前租户/当前 profile 可访问的存储桶信息。"""
+    print("\n" + "=" * 65)
+    print("🪣 正在查询 OCI Object Storage 存储桶...")
+    try:
+        data = get_bucket_info_data(app_config or load_app_config())
+        print(render_bucket_info_cli(data))
+    except Exception as e:
+        LOGGER.exception("查询存储桶信息失败")
+        print(f"❌ 查询失败: {e}")
+
+
 def get_region_subscriptions_data(app_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """查询当前租户已订阅的 OCI 区域列表。"""
     app_config = app_config or load_app_config()
@@ -2406,6 +2645,7 @@ class TelegramBotRunner:
             {"command": "menu", "description": "显示命令菜单"},
             {"command": "user_info", "description": "查看当前用户详细信息"},
             {"command": "regions", "description": "查询订阅区域"},
+            {"command": "bucket_info", "description": "查询 Object Storage 存储桶"},
             {"command": "usage_fee", "description": "查询本月费用账单"},
             {"command": "audit_events", "description": "查询审计事件日志"},
             {"command": "instance_info", "description": "查询实例信息总览"},
@@ -2441,6 +2681,7 @@ class TelegramBotRunner:
             "💬 /menu - 显示此菜单\n\n"
             "<b>📊 查询</b>\n"
             "👤 /user_info - 用户账号信息\n"
+            "🪣 /bucket_info - Object Storage 存储桶\n"
             "💰 /usage_fee - 本月费用账单\n"
             "📋 /audit_events [数量] - 审计事件日志\n"
             "🖥️ /instance_info - 实例信息总览\n\n"
@@ -2788,6 +3029,13 @@ class TelegramBotRunner:
                 return render_region_subscriptions_telegram(data)
             except Exception as e:
                 return f"❌ 查询失败: {str(e)[:200]}"
+        if normalized.startswith("/bucket_info"):
+            try:
+                data = get_bucket_info_data(self.app_config)
+                return render_bucket_info_telegram(data)
+            except Exception as e:
+                LOGGER.exception("查询存储桶信息失败")
+                return f"❌ 查询失败: {str(e)[:200]}"
         if normalized.startswith("/usage_fee"):
             report_data = get_usage_fee_report_data(self.app_config)
             return render_usage_fee_telegram(report_data, show_all=False)
@@ -2845,6 +3093,9 @@ class TelegramBotRunner:
         if action == "region_subscriptions":
             data = get_region_subscriptions_data(self.app_config)
             return render_region_subscriptions_telegram(data)
+        if action == "bucket_info":
+            data = get_bucket_info_data(self.app_config)
+            return render_bucket_info_telegram(data)
         if action == "usage_fee":
             report_data = get_usage_fee_report_data(self.app_config)
             return render_usage_fee_telegram(report_data, show_all=False)
@@ -3398,7 +3649,8 @@ def print_cli_menu() -> None:
     print("  6. 🧱 查询网络防火墙实例列表")
     print("  7. 🔒 创建/修复永不过期安全策略")
     print("  8. 🗑️  删除冗余密码策略")
-    print("  9. 🤖 启动 Telegram Bot 轮询")
+    print("  9. 🪣 查询 Object Storage 存储桶")
+    print(" 10. 🤖 启动 Telegram Bot 轮询")
     print("  0. 🚪 退出程序")
     print("=" * 62)
 
@@ -3409,9 +3661,9 @@ def main_menu(app_config: Dict[str, Any]) -> None:
 
     while True:
         print_cli_menu()
-        choice = input("👉 请选择要执行的功能 (0-9): ").strip()
+        choice = input("👉 请选择要执行的功能 (0-10): ").strip()
 
-        if choice not in ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]:
+        if choice not in ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]:
             os.system(clear_cmd)
             print("❌ 指令无效！请重新输入菜单前方的数字 (0 到 9 之间)。")
             continue
@@ -3433,6 +3685,8 @@ def main_menu(app_config: Dict[str, Any]) -> None:
         elif choice == "8":
             delete_policy(app_config)
         elif choice == "9":
+            show_bucket_info(app_config)
+        elif choice == "10":
             TelegramBotRunner(app_config).run_polling()
         elif choice == "0":
             print("\n👋 感谢使用，已安全退出程序！\n")
@@ -3453,6 +3707,7 @@ def main() -> None:
 
     sub.add_parser("user-info", help="查看当前用户详细信息")
     sub.add_parser("region-subscriptions", help="查询当前租户订阅区域")
+    sub.add_parser("bucket-info", help="查询当前租户/当前 profile 可访问的存储桶信息")
 
     uf = sub.add_parser("usage-fee", help="查询本月费用账单")
     uf.add_argument("--show-all", action="store_true", help="展示全部日期，不折叠")
@@ -3469,7 +3724,7 @@ def main() -> None:
     runp = sub.add_parser("run", help="兼容旧版：运行预设动作")
     runp.add_argument(
         "action",
-        help="user_info|region_subscriptions|usage_fee|policies|audit_events[:N]|instance_info:<OCID>|create_safe_policy|delete_policy:<名称>",
+        help="user_info|region_subscriptions|bucket_info|usage_fee|policies|audit_events[:N]|instance_info:<OCID>|create_safe_policy|delete_policy:<名称>",
     )
 
     args = parser.parse_args()
@@ -3486,6 +3741,8 @@ def main() -> None:
         return get_user_info(app_config)
     if args.cmd == "region-subscriptions":
         return show_region_subscriptions(app_config)
+    if args.cmd == "bucket-info":
+        return show_bucket_info(app_config)
     if args.cmd == "usage-fee":
         try:
             export_usage_fee(app_config, show_all=args.show_all, csv_out=args.csv_out)
@@ -3578,6 +3835,8 @@ def main() -> None:
             return get_user_info(app_config)
         if action == "region_subscriptions":
             return show_region_subscriptions(app_config)
+        if action == "bucket_info":
+            return show_bucket_info(app_config)
         if action == "usage_fee":
             return export_usage_fee(app_config)
         if action.startswith("instance_info:"):
@@ -3588,7 +3847,7 @@ def main() -> None:
         if action.startswith("delete_policy:"):
             return delete_policy(app_config, target_name=action.split(":", 1)[1].strip(), auto_approve=True)
         raise ValueError(
-            "不支持的 action。可选: user_info, region_subscriptions, usage_fee, policies, audit_events[:N], instance_info:<OCID>, create_safe_policy, delete_policy:<名称>"
+            "不支持的 action。可选: user_info, region_subscriptions, bucket_info, usage_fee, policies, audit_events[:N], instance_info:<OCID>, create_safe_policy, delete_policy:<名称>"
         )
 
 
