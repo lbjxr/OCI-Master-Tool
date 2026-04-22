@@ -28,7 +28,8 @@ class BucketInfoTests(unittest.TestCase):
         }
 
         text = OCI_Master.render_bucket_info_telegram(data)
-        self.assertIn("OCI 存储桶总览", text)
+        self.assertIn("存储桶总览", text)
+        self.assertIn("Bucket 总数", text)
         self.assertIn("logs-bucket", text)
         self.assertIn("Namespace", text)
         self.assertIn("myns", text)
@@ -36,9 +37,13 @@ class BucketInfoTests(unittest.TestCase):
         self.assertIn("Prod", text)
         self.assertIn("创建时间", text)
         self.assertIn("私有", text)
+        self.assertIn("存储层", text)
         self.assertIn("Standard", text)
+        self.assertIn("版本控制", text)
         self.assertIn("Enabled", text)
+        self.assertIn("自动分层", text)
         self.assertIn("InfrequentAccess", text)
+        self.assertIn("对象/容量", text)
         self.assertIn("12", text)
         self.assertIn("2.00 KB", text)
 
@@ -78,9 +83,11 @@ class BucketInfoTests(unittest.TestCase):
         text = OCI_Master.render_bucket_info_telegram(data)
         self.assertIn("1. 🪣 a-bucket", text)
         self.assertIn("2. 🪣 b-bucket", text)
-        self.assertEqual(text.count("🏷️ Namespace:"), 2)
         self.assertEqual(text.count("📁 Compartment:"), 2)
         self.assertEqual(text.count("🕒 创建时间:"), 2)
+        self.assertEqual(text.count("🌐 访问:"), 2)
+        self.assertEqual(text.count("🧬 版本控制:"), 2)
+        self.assertEqual(text.count("📦 对象/容量:"), 2)
 
     def test_handle_command_bucket_info_dispatch(self):
         with patch("OCI_Master.get_bucket_info_data", return_value={"namespace": "myns", "profile": "DEFAULT", "bucket_count": 0, "buckets": []}), patch(

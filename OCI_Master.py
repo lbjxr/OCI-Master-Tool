@@ -2177,21 +2177,21 @@ def render_bucket_info_telegram(data: Dict[str, Any]) -> str:
 
     if not buckets:
         return (
-            "<b>🪣 OCI 存储桶总览</b>\n"
+            "<b>🪣 存储桶总览</b>\n"
             "📭 未查询到存储桶\n"
             f"📦 Namespace: <code>{namespace}</code>\n"
             f"🪪 Profile: <code>{profile}</code>"
         )
 
     lines = [
-        "<b>🪣 OCI 存储桶总览</b>",
-        f"📊 共 <code>{int(data.get('bucket_count', len(buckets)))}</code> 个 Bucket · Namespace <code>{namespace}</code>",
+        "<b>🪣 存储桶总览</b>",
+        f"📊 Bucket 总数: <code>{int(data.get('bucket_count', len(buckets)))}</code>",
+        f"📦 Namespace: <code>{namespace}</code>",
         f"🪪 Profile: <code>{profile}</code>",
     ]
 
     for idx, bucket in enumerate(buckets, 1):
         bucket_name = html.escape(str(bucket.get("name", "N/A")))
-        bucket_namespace = html.escape(str(bucket.get("namespace", data.get("namespace", "N/A"))))
         compartment_name = html.escape(str(bucket.get("compartment_name", "N/A")))
         created_at = html.escape(format_datetime_compact(bucket.get("time_created")))
         access = html.escape(_bucket_access_text(bucket.get("public_access_type")))
@@ -2205,12 +2205,11 @@ def render_bucket_info_telegram(data: Dict[str, Any]) -> str:
             [
                 "",
                 f"<b>{idx}. 🪣 {bucket_name}</b>",
-                f"🏷️ Namespace: <code>{bucket_namespace}</code>",
                 f"📁 Compartment: <code>{compartment_name}</code>",
                 f"🕒 创建时间: <code>{created_at}</code>",
-                f"🌐 访问: <code>{access}</code> · 🧊 Tier: <code>{tier}</code>",
-                f"🧬 Versioning: <code>{versioning}</code> · 🔄 Auto Tiering: <code>{auto_tiering}</code>",
-                f"📦 约 <code>{approx_size}</code> · <code>{approx_count}</code> 对象",
+                f"🌐 访问: <code>{access}</code> · 🧊 存储层: <code>{tier}</code>",
+                f"🧬 版本控制: <code>{versioning}</code> · 🔄 自动分层: <code>{auto_tiering}</code>",
+                f"📦 对象/容量: <code>{approx_count}</code> 个 · <code>{approx_size}</code>",
             ]
         )
 
