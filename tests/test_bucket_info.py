@@ -14,6 +14,7 @@ class BucketInfoTests(unittest.TestCase):
             "buckets": [
                 {
                     "name": "logs-bucket",
+                    "namespace": "myns",
                     "compartment_name": "Prod",
                     "time_created": "2026-04-01T01:02:03+00:00",
                     "public_access_type": "NoPublicAccess",
@@ -29,12 +30,57 @@ class BucketInfoTests(unittest.TestCase):
         text = OCI_Master.render_bucket_info_telegram(data)
         self.assertIn("OCI 存储桶总览", text)
         self.assertIn("logs-bucket", text)
+        self.assertIn("Namespace", text)
+        self.assertIn("myns", text)
+        self.assertIn("Compartment", text)
         self.assertIn("Prod", text)
+        self.assertIn("创建时间", text)
         self.assertIn("私有", text)
         self.assertIn("Standard", text)
         self.assertIn("Enabled", text)
+        self.assertIn("InfrequentAccess", text)
         self.assertIn("12", text)
         self.assertIn("2.00 KB", text)
+
+    def test_render_bucket_info_telegram_multiple_buckets_keeps_clear_hierarchy(self):
+        data = {
+            "namespace": "myns",
+            "profile": "DEFAULT",
+            "bucket_count": 2,
+            "buckets": [
+                {
+                    "name": "a-bucket",
+                    "namespace": "myns",
+                    "compartment_name": "Alpha",
+                    "time_created": "2026-04-01T01:02:03+00:00",
+                    "public_access_type": "NoPublicAccess",
+                    "storage_tier": "Standard",
+                    "versioning": "Enabled",
+                    "auto_tiering": "Disabled",
+                    "approximate_count": 1,
+                    "approximate_size": 1024,
+                },
+                {
+                    "name": "b-bucket",
+                    "namespace": "myns",
+                    "compartment_name": "Beta",
+                    "time_created": "2026-04-02T01:02:03+00:00",
+                    "public_access_type": "ObjectRead",
+                    "storage_tier": "Archive",
+                    "versioning": "Disabled",
+                    "auto_tiering": "InfrequentAccess",
+                    "approximate_count": 2,
+                    "approximate_size": 2048,
+                },
+            ],
+        }
+
+        text = OCI_Master.render_bucket_info_telegram(data)
+        self.assertIn("1. 🪣 a-bucket", text)
+        self.assertIn("2. 🪣 b-bucket", text)
+        self.assertEqual(text.count("🏷️ Namespace:"), 2)
+        self.assertEqual(text.count("📁 Compartment:"), 2)
+        self.assertEqual(text.count("🕒 创建时间:"), 2)
 
     def test_handle_command_bucket_info_dispatch(self):
         with patch("OCI_Master.get_bucket_info_data", return_value={"namespace": "myns", "profile": "DEFAULT", "bucket_count": 0, "buckets": []}), patch(

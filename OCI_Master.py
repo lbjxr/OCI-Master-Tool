@@ -2172,40 +2172,51 @@ def get_bucket_info_data(app_config: Optional[Dict[str, Any]] = None) -> Dict[st
 
 def render_bucket_info_telegram(data: Dict[str, Any]) -> str:
     buckets = data.get("buckets") or []
+    namespace = html.escape(str(data.get("namespace", "N/A")))
+    profile = html.escape(str(data.get("profile", "DEFAULT")))
+
     if not buckets:
         return (
-            "📭 <b>未查询到存储桶</b>\n"
-            f"📦 Namespace: <code>{html.escape(str(data.get('namespace', 'N/A')))}</code>\n"
-            f"🪪 Profile: <code>{html.escape(str(data.get('profile', 'DEFAULT')))}</code>"
+            "<b>🪣 OCI 存储桶总览</b>\n"
+            "📭 未查询到存储桶\n"
+            f"📦 Namespace: <code>{namespace}</code>\n"
+            f"🪪 Profile: <code>{profile}</code>"
         )
 
     lines = [
         "<b>🪣 OCI 存储桶总览</b>",
-        f"📦 Namespace: <code>{html.escape(str(data.get('namespace', 'N/A')))}</code>",
-        f"🪪 Profile: <code>{html.escape(str(data.get('profile', 'DEFAULT')))}</code>",
-        f"📊 Bucket 数量: <code>{int(data.get('bucket_count', len(buckets)))}</code>",
+        f"📊 共 <code>{int(data.get('bucket_count', len(buckets)))}</code> 个 Bucket · Namespace <code>{namespace}</code>",
+        f"🪪 Profile: <code>{profile}</code>",
     ]
 
     for idx, bucket in enumerate(buckets, 1):
-        lines.append(f"\n<b>{idx}. {html.escape(str(bucket.get('name', 'N/A')))}</b>")
-        lines.append(f"📁 {html.escape(str(bucket.get('compartment_name', 'N/A')))}")
-        lines.append(
-            "🌐 {access} | 🧊 {tier} | 🧬 {versioning} | 🔄 {auto_tiering}".format(
-                access=html.escape(_bucket_access_text(bucket.get("public_access_type"))),
-                tier=html.escape(str(bucket.get("storage_tier", "N/A"))),
-                versioning=html.escape(str(bucket.get("versioning", "N/A"))),
-                auto_tiering=html.escape(str(bucket.get("auto_tiering", "N/A"))),
-            )
-        )
-        lines.append(
-            "📦 约 {size} / {count} 对象".format(
-                size=html.escape(format_size_compact(bucket.get("approximate_size"))),
-                count=html.escape(str(bucket.get("approximate_count", "N/A"))),
-            )
-        )
-        lines.append(f"🕒 {html.escape(format_datetime_compact(bucket.get('time_created')))}")
+        bucket_name = html.escape(str(bucket.get("name", "N/A")))
+        bucket_namespace = html.escape(str(bucket.get("namespace", data.get("namespace", "N/A"))))
+        compartment_name = html.escape(str(bucket.get("compartment_name", "N/A")))
+        created_at = html.escape(format_datetime_compact(bucket.get("time_created")))
+        access = html.escape(_bucket_access_text(bucket.get("public_access_type")))
+        tier = html.escape(str(bucket.get("storage_tier", "N/A")))
+        versioning = html.escape(str(bucket.get("versioning", "N/A")))
+        auto_tiering = html.escape(str(bucket.get("auto_tiering", "N/A")))
+        approx_size = html.escape(format_size_compact(bucket.get("approximate_size")))
+        approx_count = html.escape(str(bucket.get("approximate_count", "N/A")))
 
-    lines.append(f"\n<i>{html.escape(str(data.get('stats_note', '')))}</i>")
+        lines.extend(
+            [
+                "",
+                f"<b>{idx}. 🪣 {bucket_name}</b>",
+                f"🏷️ Namespace: <code>{bucket_namespace}</code>",
+                f"📁 Compartment: <code>{compartment_name}</code>",
+                f"🕒 创建时间: <code>{created_at}</code>",
+                f"🌐 访问: <code>{access}</code> · 🧊 Tier: <code>{tier}</code>",
+                f"🧬 Versioning: <code>{versioning}</code> · 🔄 Auto Tiering: <code>{auto_tiering}</code>",
+                f"📦 约 <code>{approx_size}</code> · <code>{approx_count}</code> 对象",
+            ]
+        )
+
+    stats_note = str(data.get("stats_note", "")).strip()
+    if stats_note:
+        lines.extend(["", f"<i>ℹ️ {html.escape(stats_note)}</i>"])
     return "\n".join(lines)
 
 
