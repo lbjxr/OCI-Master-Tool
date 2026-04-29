@@ -1,12 +1,34 @@
 {
+  "active_profile": "DEFAULT",
+  "profiles": {
+    "DEFAULT": {
+      "config_file": "/root/.oci/config",
+      "profile_name": "DEFAULT",
+      "identity_domain_name": "Default",
+      "instance_defaults": {
+        "default_compartment_ids": [],
+        "default_compartment_names": []
+      }
+    }
+  },
   "oci": {
     "config_file": "/root/.oci/config",
     "profile_name": "DEFAULT",
     "identity_domain_name": "Default"
   },
+  "instances": {
+    "telegram_page_size": 8,
+    "default_compartment_ids": [],
+    "default_compartment_names": []
+  },
+  "network_security": {
+    "quick_open_allowed_tcp_ports": [22, 80, 443, 3389],
+    "default_source_cidr": "0.0.0.0/0"
+  },
   "output": {
     "directory": "/root/.oci/Oracle",
-    "cost_report_filename": "oci_costs_{year}_{month}.csv"
+    "cost_report_filename": "oci_costs_{year}_{month}.csv",
+    "usage_fee_display_days": 1
   },
   "policy": {
     "create_safe_policy": {
@@ -18,10 +40,10 @@
     }
   },
   "telegram": {
-    "enabled": true,
-    "bot_token": "REDACTED",
-    "allowed_chat_ids": ["REDACTED"],
-    "allowed_user_ids": ["REDACTED"],
+    "enabled": false,
+    "bot_token": "<telegram-bot-token>",
+    "allowed_chat_ids": [],
+    "allowed_user_ids": [],
     "poll_interval_seconds": 3,
     "initial_update_offset": 0
   }
