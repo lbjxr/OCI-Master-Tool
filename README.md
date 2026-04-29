@@ -1,368 +1,180 @@
-# ☁️ OCI Master - 甲骨文云一键运维助手
+# OCI Master
 
-OCI Master 是一个基于 Python 与 Oracle Cloud Infrastructure (OCI) SDK 的轻量级工具，帮助甲骨文云用户完成日常运维：账单查询导出、密码策略治理、网络防火墙配置以及 Telegram 机器人查询等。
+一个基于 Python 的 OCI 运维工具，当前支持：
+- 当前用户信息查询
+- 本月费用账单查询
+- Identity Domain 密码策略管理
+- 实例列表 / 实例详情
+- 实例启动 / 停止 / 重启
+- 实例网络 / 安全概览（VNIC / Subnet / NSG / Security List）
+- 低风险快捷网络操作：常见 TCP 端口新增入站规则、删除临时规则（预览/确认式）
+- Region subscriptions 查询
+- Object Storage / Bucket 基础信息查询
+- Audit Events 查询（只读）
+- 实例列表分页、动作后状态复查、默认 compartment 过滤
+- Telegram Bot 命令入口
 
-## 📦 最新版本 v1.7.0（2026-04-07）
-- 🧹 命令优化：删除冗余命令（`/help`、`/policies`、`/create_safe_policy`、`/delete_policy`），简化菜单结构
-- 🔥 网络防火墙配置：`/sl_menu` 改名并换用 🔥 图标，更贴合防火墙概念
-- 🐛 BUG 修复：修复 `/start` 命令语法错误，欢迎信息改为引导式提示
-- 📋 文档增强：新增项目审视报告（`PROJECT_AUDIT_2026-04-07.md`）与 `CHANGELOG.md`
-- 🗑️ 备份清理：保留最近 5 份 Security List 备份，删除 20 份旧备份
-- 📉 代码减脂：总行数从 3478 减至 3434（-52，-1.3%）
+## 当前运行约定
 
-> 历史版本记录请查阅 [CHANGELOG.md](CHANGELOG.md)。
+这个项目当前**不依赖系统 Python 环境完整性**。
+宿主机的 `/usr/bin/python3` 缺少完整 `venv/pip` 能力，因此项目采用：
+- 运行解释器：`/usr/local/python3/bin/python3.14`
+- 项目本地依赖目录：`./.deps`
+- 兼容入口：`OCI_Master.py` 会自动把 `./.deps` 注入 `sys.path`
 
-## ✨ 主要功能（Features）
-- 🔐 密码策略菜单管理：查看/创建/删除策略，自定义策略名称与过期天数（`/policy_menu`）
-- 🔥 网络防火墙配置：实例优先流程、智能向导、查看/新增/删除/替换 Security List 规则（`/sl_menu`）
-- 💰 费用导出：按日历月统计各服务扣费明细，UTF-8-SIG CSV（兼容 Excel）
-- 🖥️ 实例信息总览：查询所有实例的 CPU、内存、存储、状态等详细信息（`/instance_info`）
-- 🪣 存储桶总览：查询当前 profile 可访问的 OCI Object Storage buckets，包含 namespace、compartment、创建时间、访问类型、存储层、版本控制、自动分层、近似对象数/容量（`bucket-info` / `/bucket_info`）
-- 🔍 审计事件查询：查询登录/登出/密码修改/权限变更等操作记录
-- 🤖 本地运行：基于 OCI 官方 SDK 直连，无需第三方托管密钥
-- 🧭 多平台支持：Windows / Linux / macOS
-- 💬 Telegram 机器人：随时查询费用、用户信息、密码策略、审计事件、实例信息（移动端友好展示）
----
+也就是说，正常情况下直接运行下面这些命令即可，不需要手工再拼 `PYTHONPATH`。
 
-## 🚀 快速开始(Quick Start)
+## 目录说明
 
-### 1) 获取 OCI API 凭证
-- 控制台路径:身份和安全 (Identity & Security) → 域 (Domain) → 用户 (User) → API 密钥
-- 添加 API 密钥并下载 .pem 私钥;复制生成的配置信息(user、tenancy、fingerprint、region 等)
-- 权限要求:建议将 API 用户加入 Identity Domain Administrator 或 Security Administrator 组
+- `OCI_Master.py`：兼容入口
+- `oci_master/`：主代码包
+- `oci_master/services/`：业务模块
+- `oci_master_config.json`：实际配置
+- `oci_master_config.example.json`：配置示例
+- `.deps/`：项目本地 Python 依赖目录
+- `run_oci_master.sh`：推荐启动脚本
 
-### 2) 配置凭证文件
-- 私钥建议路径:
-  - Windows: `C:\Users\<Username>\.oci\oci_api_key.pem`
-  - Linux/macOS: `~/.oci/oci_api_key.pem`
-- 创建 `config` 文件(与私钥同目录),示例:
+## 推荐启动方式
 
-```ini
-[DEFAULT]
-user=ocid1.user.oc1..xxxxxx
-fingerprint=xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx
-tenancy=ocid1.tenancy.oc1..xxxxxx
-region=ap-tokyo-1
-key_file=/absolute/path/to/.oci/oci_api_key.pem
-```
+### CLI 菜单
 
-- Linux/macOS 需收紧私钥权限:
-```bash
-chmod 600 ~/.oci/oci_api_key.pem
-```
+> ./run_oci_master.sh
 
-### 3) 安装依赖
-```bash
-pip install -r requirements.txt  # 若无此文件,可执行: pip install oci requests
-```
+### Telegram Bot 轮询
 
----
+> ./run_oci_master.sh telegram
 
-## 🧪 使用方式(Usage)
+### 直接执行 action
 
-### A. CLI 模式(交互式菜单)
-- 启动:
-```bash
-python3 OCI_Master.py
-```
-- 直接命令(非交互):
-```bash
-python3 OCI_Master.py region-subscriptions
-python3 OCI_Master.py bucket-info
-python3 OCI_Master.py run region_subscriptions
-python3 OCI_Master.py run bucket_info
-```
-- 菜单示例:
-```plaintext
-  1. 👤 查看当前用户信息
-  2. 💰 导出本月费用账单 (CSV)
-  3. 🛡️ 查询当前密码策略看板
-  4. 📊 查询 Identity Domains 审计事件
-  5. 🔒 创建/修复永不过期安全策略
-  6. 🗑️ 删除冗余密码策略
-  7. 🪣 查询 Object Storage 存储桶
-  8. 🚪 退出程序
-```
+> ./run_oci_master.sh run user_info
+> ./run_oci_master.sh run usage_fee
+> ./run_oci_master.sh run region_subscriptions
+> ./run_oci_master.sh run bucket_info
+> ./run_oci_master.sh run audit_events:10
+> ./run_oci_master.sh run policies
+> ./run_oci_master.sh run list_instances
+> ./run_oci_master.sh run instance_detail:oracle-arm
+> ./run_oci_master.sh run instance_network:oracle-arm
+> ./run_oci_master.sh run open_ingress_preview:oracle-arm:22:1.2.3.4/32
+> ./run_oci_master.sh run cleanup_temp_rules_preview:oracle-arm:22:1.2.3.4/32
 
-### B. Telegram Bot 模式(移动端友好)
+## 也可直接运行兼容入口
 
-#### 基础配置
-- 在 `oci_master_config.json` 中启用 Telegram(token 推荐走环境变量,见下节):
+> /usr/local/python3/bin/python3.14 OCI_Master.py
+> /usr/local/python3/bin/python3.14 OCI_Master.py telegram
+> /usr/local/python3/bin/python3.14 OCI_Master.py run list_instances
+
+`OCI_Master.py` 已自动注入 `.deps`，因此不必再额外写 `PYTHONPATH`。
+
+## Telegram 支持命令
+
+> /user_info
+> /usage_fee
+> /regions
+> /bucket_info
+> /audit_events 10
+> /policies
+> /create_safe_policy
+> /delete_policy 名称
+> /instances
+> /instance_detail <名称|OCID>
+> /instance_start <名称|OCID>
+> /instance_stop <名称|OCID>
+> /instance_restart <名称|OCID>
+> /instance_network <名称|OCID>
+> /netsec_open <名称|OCID> <端口> <CIDR>
+> /netsec_close_temp <名称|OCID> <端口> <CIDR>
+> /run <action>
+
+## 配置说明
+
+当前配置同时支持两种写法：
+
+### 旧写法（兼容保留）
+
 ```json
 {
-  "telegram": {
-    "enabled": true,
-    "bot_token": "留空或删除,推荐用环境变量",
-    "allowed_chat_ids": ["123456789", "-1001234567890"],
-    "allowed_user_ids": ["987654321"]
+  "oci": {
+    "config_file": "/root/.oci/config",
+    "profile_name": "DEFAULT",
+    "identity_domain_name": "Default"
   }
 }
 ```
-- 启动:
-```bash
-python3 OCI_Master.py telegram
+
+### 新写法（推荐，便于多账号）
+
+```json
+{
+  "active_profile": "DEFAULT",
+  "profiles": {
+    "DEFAULT": {
+      "config_file": "/root/.oci/config",
+      "profile_name": "DEFAULT",
+      "identity_domain_name": "Default",
+      "instance_defaults": {
+        "default_compartment_ids": ["ocid1.compartment.oc1..example"],
+        "default_compartment_names": ["Prod" ]
+      }
+    }
+  },
+  "instances": {
+    "telegram_page_size": 8,
+    "default_compartment_ids": [],
+    "default_compartment_names": []
+  },
+  "network_security": {
+    "quick_open_allowed_tcp_ports": [22, 80, 443, 3389],
+    "default_source_cidr": "0.0.0.0/0"
+  }
+}
 ```
 
-#### 安全配置(强烈推荐)
-- 环境变量优先级(从高到低):
-  1. `OCI_MASTER_BOT_TOKEN`(最高优先,推荐)
-  2. 配置文件 `telegram.bot_token`
-- 白名单授权逻辑:
-  - 配置了 `allowed_chat_ids` 则消息必须来自白名单聊天
-  - 配置了 `allowed_user_ids` 则消息必须来自白名单用户
-  - 两者可同时配置(严格模式);未授权请求会被拒绝并记录警告日志
-- 获取 ID:可使用 @userinfobot(user_id)与 @getidsbot(chat_id)
+说明：
+- `instances.default_compartment_ids` / `instances.default_compartment_names` 是全局默认过滤。
+- `profiles.<name>.instance_defaults.*` 会覆盖全局默认过滤，适合多账号分开设白名单。
+- 两者都不配时，仍保持旧行为：遍历全部可访问 compartment。
+- `telegram_page_size` 控制 Telegram 实例列表每页数量。
+- `network_security.quick_open_allowed_tcp_ports` 只控制 Telegram 端口页里的“快捷按钮”有哪些，默认仅 22/80/443/3389。
+- 现在命令式入口与 Telegram 输入态都支持自定义单个 TCP 端口；仍限制为 `1-65535`，且不支持端口段/多端口/UDP。
+- `network_security.default_source_cidr` 仅作为 CLI 交互输入时的默认值；Telegram/CLI action 仍建议显式传 CIDR。
 
-#### systemd 服务部署(推荐)
-- 下面示例中的 `/opt/oci-master-tool` 只是**示例安装路径**。请先把仓库 clone 到你自己的部署目录，再把文中的项目路径替换成你的实际路径。
-- 下面统一使用这组示例值：
-  - 项目目录：`/opt/oci-master-tool`
-  - 配置文件：`/root/oci_master_config.json`
-  - 环境文件：`/etc/oci-master.env`
-  - 服务名：`oci-master-telegram`
+## 已验证情况
 
-##### 前置准备(所有部署方式共用)
-```bash
-# 1) 获取代码并安装依赖
-sudo mkdir -p /opt/oci-master-tool
-sudo chown "$USER":"$USER" /opt/oci-master-tool
-git clone https://github.com/lbjxr/OCI-Master-Tool.git /opt/oci-master-tool
-cd /opt/oci-master-tool
-python3 -m pip install -r requirements.txt
+本地已验证通过：
+- 用户信息查询
+- 费用账单查询
+- Region subscriptions 渲染
+- Bucket / Object Storage 渲染
+- Audit events 渲染
+- 密码策略看板
+- 实例列表
+- 实例详情
+- 实例列表分页渲染
+- 实例动作后的状态复查回执
 
-# 2) 写入 Telegram Bot Token
-echo 'OCI_MASTER_BOT_TOKEN=你的_token' | sudo tee /etc/oci-master.env
-sudo chmod 600 /etc/oci-master.env
-```
+实例动作链路已接好，但是否执行真实启停/重启应按现场需要谨慎操作。
+网络快捷操作当前只做低风险范围：仅主 VNIC 关联对象、仅 ingress、仅单个 TCP 端口、执行前先预览。
 
-##### 方式一：脚本化初始化(推荐)
-- 项目已提供 `scripts/setup_systemd.sh`，会生成与手动方式一致的 service 文件。
-- 脚本特性：
-  - 生成前检查 `OCI_Master.py` 是否存在
-  - 如果目标 service 已存在，会先自动备份
-  - Telegram token 不写入 service 文件，只通过 `EnvironmentFile` 注入
-- 用法：
-```bash
-cd /opt/oci-master-tool
-chmod +x scripts/setup_systemd.sh
-sudo ./scripts/setup_systemd.sh \
-  --install-dir /opt/oci-master-tool \
-  --config-path /root/oci_master_config.json \
-  --service-name oci-master-telegram \
-  --user root \
-  --env-file /etc/oci-master.env \
-  --enable-now
-```
+## 实例管理补充说明
 
-##### 方式二：手动写入 service 文件
-```bash
-sudo tee /etc/systemd/system/oci-master-telegram.service >/dev/null <<'EOF'
-[Unit]
-Description=OCI Master Telegram runner
-After=network-online.target
-Wants=network-online.target
+- Telegram `/instances` 现在支持分页浏览，不再只截前几个固定实例。
+- 新增 `/regions`、`/bucket_info`、`/audit_events [N]` 以及对应 `/run region_subscriptions`、`/run bucket_info`、`/run audit_events[:N]`。
+- Object Storage 当前只做只读查看：namespace、bucket 列表、compartment、创建时间、public access、storage tier、versioning、auto tiering、approximate object count/size。
+- Audit Events 当前只做只读查看，走 Identity Domain `/admin/v1/AuditEvents`，按旧版展示 message / actor / clientIp / timestamp。
+- 实例列表按钮与动作按钮全部改用短 token 映射，避免把超长 OCID 直接塞进 `callback_data`。
+- `/instance_start`、`/instance_stop`、`/instance_restart` 以及 Telegram 按钮动作，提交后会补一次短暂状态复查。
+- `/instance_network` 与实例详情页按钮可查看该实例相关的 VNIC / Subnet / NSG / Security List 概览，并继续点进 network/security 按钮流。
+- Telegram 网络/安全按钮流现已支持：实例详情 → 网络/安全概览 → 选择“开放临时端口 / 清理临时规则” → 快捷端口按钮或“输入自定义端口” → 默认或自定义 CIDR → 预览 → 确认 → 执行回执。
+- 端口选择页默认使用 `network_security.quick_open_allowed_tcp_ports` 生成快捷按钮，但不再把它当成硬限制；CIDR 支持一键使用默认值或进入输入式自定义。
+- `/netsec_open`、`/netsec_close_temp` 与 `run open_ingress_preview/apply`、`run cleanup_temp_rules_preview/apply` 已可直接接受任意合法单个 TCP 端口，并继续统一走预览/确认/回执链路。
+- 删除临时规则只匹配本工具写入的临时描述前缀 `oci-master-temp`，避免误删已有长期规则。
+- 如果实例仍处于 `STARTING` / `STOPPING` / `RESETTING` 等过渡态，回执会明确提示稍后复查。
 
-[Service]
-Type=simple
-WorkingDirectory=/opt/oci-master-tool
-Environment=OCI_MASTER_APP_CONFIG=/root/oci_master_config.json
-EnvironmentFile=/etc/oci-master.env
-ExecStart=/usr/bin/python3 /opt/oci-master-tool/OCI_Master.py telegram
-Restart=always
-RestartSec=5s
-KillSignal=SIGTERM
-TimeoutStopSec=15
-StandardOutput=journal
-StandardError=journal
-User=root
+## 已知注意事项
 
-[Install]
-WantedBy=multi-user.target
-EOF
-```
-
-##### 启用与验证(所有部署方式共用)
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now oci-master-telegram.service
-sudo systemctl --no-pager -l status oci-master-telegram.service
-```
-- 如只想先生成而不触发 `systemctl`，脚本方式可追加 `--dry-run`。
-- 如果你的仓库不在 `/opt/oci-master-tool`，请至少同步修改这两项：
-  - `WorkingDirectory=/你的实际项目目录`
-  - `ExecStart=/usr/bin/python3 /你的实际项目目录/OCI_Master.py telegram`
-
-#### 命令列表
-- 👋 `/start` - 显示欢迎信息，并提示使用 `/menu`
-- 💬 `/menu` - 显示当前可用命令菜单
-- 👤 `/user_info` - 用户账号信息(基础/联系方式/权限/安全状态)
-- 🪣 `/bucket_info` - 查询 Object Storage 存储桶总览
-- 💰 `/usage_fee` - 本月费用账单(按日汇总 + 服务明细)
-- 📋 `/audit_events [数量]` - 查询审计事件日志，默认最近 10 条
-- 🖥️ `/instance_info` - 查询实例信息总览
-- 🔐 `/policy_menu` - 密码策略菜单管理
-- 🔥 `/sl_menu` - 网络防火墙配置
-
-> 说明:机器人自动使用 HTML 渲染(parse_mode=HTML),无需额外配置。
-
-示例(/usage_fee):
-```
-💰 本月费用汇总
-查询区间: 2026-04-01 ~ 2026-04-05
-本月预估总计: 0.1234 USD
-
-📆 2026-04-05
-💵 小计: 0.0567 USD
-  🖥️ 计算实例: 0.0300
-  💾 块存储: 0.0200
-  🌐 网络带宽: 0.0067
-```
-
----
-
-### C. 审计事件查询(Identity Domains Audit)
-
-OCI Master 支持查询 Identity Domains 审计事件,追踪身份相关操作(登录/登出/密码修改/权限变更等)。
-
-#### CLI 命令
-```bash
-python3 OCI_Master.py audit-events --limit 20
-python3 OCI_Master.py audit-events --filter 'message co "login"' --limit 50
-```
-
-参数说明:
-- `--limit N`:返回条数(默认 10)
-- `--filter "SCIM"`:SCIM 2.0 过滤语法,例如 `message co "password"` / `actorName eq "user@example.com"`
-- `--sort-by field`:排序字段(默认 timestamp)
-- `--sort-order ORDER`:排序方式(ascending / descending)
-
-#### Telegram 命令
-```
-/audit_events        # 查询最近 10 条
-/audit_events 20     # 查询最近 20 条(最多 50)
-```
-
-示例输出:
-```
-📋 审计事件 (最近 10 条)
-━━━━━━━━━━━━━━━━━━━━━━
-
-🔑 User b.com signed in
-   👤 用户: <code>b@com</code>
-   🌐 IP: <code>123.45.67.89</code>
-   🕒 时间: 04-01 08:36:16
-
-🔒 Password policy updated
-   👤 用户: <code>11用户名</code>
-   🌐 IP: <code>98.76.54.32</code>
-   🕒 时间: 04-01 08:30:22
-```
-
-#### 技术细节
-- **API 调用**:Identity Domains REST API(`/admin/v1/AuditEvents`)
-- **SDK 限制**:Python OCI SDK 未封装此 API,使用 `oci.signer.Signer` 直接签名 HTTP 请求
-- **字段映射**:
-  - 用户名:`actorDisplayName` / `actorName`
-  - 源 IP:`clientIp`
-  - 事件描述:`message`
-  - 时间戳:`timestamp`
-
----
-
-### D. 实例网络安全查询(VNIC / NSG / Security Lists)
-
-OCI Master 支持从 **计算实例** 出发,查询实际生效的网络安全配置。
-
-查询链路:
-- 实例 → VNIC Attachments → VNIC
-- VNIC → NSG
-- VNIC 所在 Subnet → Security Lists
-
-#### CLI 命令
-```bash
-python3 OCI_Master.py instance-network ocid1.instance.oc1..xxxxxx
-python3 OCI_Master.py nsg-rules ocid1.networksecuritygroup.oc1..xxxxxx
-python3 OCI_Master.py security-list-rules ocid1.securitylist.oc1..xxxxxx
-```
-
-#### Telegram 命令
-```
-/instance_network ocid1.instance.oc1..xxxxxx
-/nsg_rules ocid1.networksecuritygroup.oc1..xxxxxx
-/sl_rules ocid1.securitylist.oc1..xxxxxx
-```
-
-#### 输出内容
-- 实例名称 / 状态 / 实例 OCID
-- 每个 VNIC 的私网 / 公网 IP
-- VNIC 所在子网
-- VNIC 绑定的 NSG
-- 子网绑定的 Security Lists
-- NSG / Security List 规则摘要
-
-#### 技术细节
-- **ComputeClient**:`get_instance()`、`list_vnic_attachments()`
-- **VirtualNetworkClient**:`get_vnic()`、`get_subnet()`、`get_network_security_group()`、`get_security_list()`、`list_network_security_group_security_rules()`
-
----
-
-### E. Security List 管理(备份 / 预览 / 显式提交)
-
-OCI Master 当前已支持 **Security List Ingress 规则管理**,并采用安全优先策略:
-- 默认仅预览,不修改线上
-- 每次变更前自动导出 JSON 备份
-- 只有显式加 `--apply` 才会真正提交到 OCI
-
-#### CLI 命令
-```bash
-python3 OCI_Master.py security-list-export ocid1.securitylist.oc1..xxxxxx
-python3 OCI_Master.py security-list-add-ingress ocid1.securitylist.oc1..xxxxxx --source 0.0.0.0/0 --protocol 6 --port-min 22 --port-max 22
-python3 OCI_Master.py security-list-remove-ingress ocid1.securitylist.oc1..xxxxxx --rule-index 1
-```
-
-#### 真正提交变更
-```bash
-python3 OCI_Master.py security-list-add-ingress ocid1.securitylist.oc1..xxxxxx --source 0.0.0.0/0 --protocol 6 --port-min 22 --port-max 22 --apply
-python3 OCI_Master.py security-list-remove-ingress ocid1.securitylist.oc1..xxxxxx --rule-index 1 --apply
-```
-
-#### 行为说明
-- `security-list-export`:导出当前完整 Security List JSON 备份
-- `security-list-add-ingress`:新增一条 Ingress 规则(默认预览)
-- `security-list-remove-ingress`:按序号删除一条 Ingress 规则(默认预览)
-- 备份目录:`backups/`
-
----
-
-## 📚 更新记录(Changelog)
-
-- 2026-04-06 · v1.3.0
-  - 新功能:实例网络安全查询(CLI + Telegram)
-  - 支持从实例出发查看 VNIC / NSG / Security Lists / 规则摘要
-  - 新功能:Security List 管理(导出备份 / 添加 Ingress / 删除 Ingress)
-  - 管理策略:默认预览,显式 `--apply` 才会落库
-  - 新增命令:`instance-network`、`nsg-rules`、`security-list-rules`
-  - 新增命令:`security-list-export`、`security-list-add-ingress`、`security-list-remove-ingress`
-  - 新增 Telegram 命令:`/instance_network`、`/nsg_rules`、`/sl_rules`
-
-- 2026-04-05 · v1.2.0
-  - 新功能:Identity Domains 审计事件查询(CLI + Telegram)
-  - 支持 SCIM 2.0 过滤语法(`message co "login"`)
-  - 移动端友好 UI:卡片式布局(费用/用户/策略/审计)
-  - 服务类型中文化与图标映射
-  - 安全增强:授权白名单、环境变量 Token、HTML 转义、配置校验
-  - 健壮性:空数据提示、常量化、超时优化
-  - Bug 修复:Telegram Bot HTML 转义、unbuffered 输出、REST API 字段映射
-
-- 2026-04-05 · v1.1.0
-  - 移动端友好 UI 优化
-  - 服务类型中文化
-
-- 2026-04-03 · v1.0.x
-  - 增强用户/域信息展示
-  - 策略看板与优先级表
-  - 本月费用导出(CSV)
-  - 预留 Telegram 机器人钩子
-
-> 注:自 2026-04-04 起统一仅保留单一入口脚本 `OCI_Master.py`。
-
+- 当前 `OCI_Master.py` 启动时会尝试清屏；在无 `TERM` 环境下可能看到 `TERM environment variable not set`，不影响功能。
+- 如果后续要做长期部署，建议再补一个 systemd service 文件，把 `run_oci_master.sh telegram` 收成正式服务。
+- Audit Events 依赖当前 profile 对 Identity Domain 审计接口有权限；若租户/域权限不足，会直接报 OCI/HTTP 错误。
+- Object Storage bucket 统计字段使用 approximateCount / approximateSize，属于 OCI 近似值，不保证秒级精确。
+- 当前快捷网络修改优先选主 VNIC 关联的第一个 NSG；若主 VNIC 没 NSG，则回落到主 VNIC 所在 Subnet 的第一个 Security List。这样是为了先保守上线，不碰附属 VNIC / IPv6 / 更复杂拓扑。
