@@ -109,19 +109,17 @@ OCI Master 想解决的不是“所有事情”，而是**最常见、最高频�
 
 ---
 
-## 🖼️ 界面预览（占位）
+## 🖼️ 界面预览
 
-> 后续可在这里补：
->
-> - Telegram Bot 首页截图
-> - 实例详情页截图
-> - 网络安全预览 / 确认流程截图
-> - Bucket / Audit Events 展示截图
+<img width="263" height="260" alt="PixPin_2026-04-30_16-01-29" src="https://github.com/user-attachments/assets/1d6d7cca-d4b5-4101-aad7-5ad4340ed7b7" />
 
-```text
-[ Screenshot Placeholder ]
-Telegram Bot Home / Instance Detail / Network Security Preview / Bucket Info
-```
+<img width="256" height="385" alt="PixPin_2026-04-30_16-02-11" src="https://github.com/user-attachments/assets/1296f739-3179-4c0b-8547-8563d9e68b65" />
+
+<img width="320" height="497" alt="PixPin_2026-04-30_16-02-53" src="https://github.com/user-attachments/assets/da847f0b-2a68-4a75-b283-27f263acd87f" />
+
+<img width="274" height="353" alt="PixPin_2026-04-30_16-03-37" src="https://github.com/user-attachments/assets/bead9f40-7ba0-491f-9f19-c5ae97ccec9a" />
+
+
 
 ---
 
