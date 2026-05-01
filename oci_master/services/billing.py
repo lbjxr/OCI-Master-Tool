@@ -18,7 +18,7 @@ def export_usage_fee(app_config: Optional[Dict[str, Any]] = None) -> None:
 
         now_utc = datetime.now(timezone.utc)
         start_time = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        end_time = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_time = now_utc
 
         request_details = oci.usage_api.models.RequestSummarizedUsagesDetails(
             tenant_id=config["tenancy"],
@@ -83,7 +83,7 @@ def get_usage_fee_report_data(app_config: Optional[Dict[str, Any]] = None) -> Di
 
     now_utc = datetime.now(timezone.utc)
     start_time = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    end_time = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_time = now_utc
 
     request_details = oci.usage_api.models.RequestSummarizedUsagesDetails(
         tenant_id=config["tenancy"],
