@@ -18,7 +18,11 @@ def export_usage_fee(app_config: Optional[Dict[str, Any]] = None) -> None:
 
         now_utc = datetime.now(timezone.utc)
         start_time = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        end_time = now_utc
+        end_time = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        if end_time <= start_time:
+            print("提示：本月暂无可查询的日粒度费用数据，请稍后再试。")
+            return
 
         request_details = oci.usage_api.models.RequestSummarizedUsagesDetails(
             tenant_id=config["tenancy"],
@@ -83,7 +87,19 @@ def get_usage_fee_report_data(app_config: Optional[Dict[str, Any]] = None) -> Di
 
     now_utc = datetime.now(timezone.utc)
     start_time = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    end_time = now_utc
+    end_time = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if end_time <= start_time:
+        return {
+            "start_time": start_time,
+            "end_time": end_time,
+            "rows": [],
+            "unique_dates": [],
+            "display_days": display_days,
+            "total_cost": 0.0,
+            "currency": "USD",
+            "pending_month_start": True,
+        }
 
     request_details = oci.usage_api.models.RequestSummarizedUsagesDetails(
         tenant_id=config["tenancy"],
@@ -123,6 +139,7 @@ def get_usage_fee_report_data(app_config: Optional[Dict[str, Any]] = None) -> Di
         "display_days": display_days,
         "total_cost": total_cost,
         "currency": currency,
+        "pending_month_start": False,
     }
 
 
@@ -170,10 +187,13 @@ def render_usage_fee_telegram(report_data: Dict[str, Any], show_all: bool = Fals
     display_days = report_data["display_days"]
 
     if not unique_dates:
+        empty_text = "本月暂无可展示费用数据。"
+        if report_data.get("pending_month_start"):
+            empty_text = "本月刚开始，OCI 日粒度账单数据尚未产出，请稍后再试。"
         return "\n".join([
             "<b>💰 本月费用汇总</b>",
             f"<blockquote>查询区间：<code>{report_data['start_time'].strftime('%Y-%m-%d')} ~ {report_data['end_time'].strftime('%Y-%m-%d')}</code></blockquote>",
-            "本月暂无费用数据。",
+            empty_text,
         ])
 
     latest_dates = set(unique_dates if show_all else unique_dates[-display_days:]) if unique_dates else set()
