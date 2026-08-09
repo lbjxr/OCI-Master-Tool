@@ -118,9 +118,11 @@ def render_region_subscriptions_telegram(data: Dict[str, Any]) -> str:
 
     lines = [
         "<b>🌏 OCI 订阅区域</b>",
-        f"🪪 Profile：<code>{html.escape(str(data.get('profile', 'DEFAULT')))}</code>",
-        f"📌 Home Region：<code>{html.escape(str(data.get('home_region', 'N/A')))}</code>",
-        f"📈 已订阅：<code>{int(data.get('total_regions', len(regions)))}</code> 个",
+        "<blockquote>"
+        f"🪪 Profile：<code>{html.escape(str(data.get('profile', 'DEFAULT')))}</code>\n"
+        f"📌 Home Region：<code>{html.escape(str(data.get('home_region', 'N/A')))}</code>\n"
+        f"📈 已订阅：<code>{int(data.get('total_regions', len(regions)))}</code> 个"
+        "</blockquote>",
     ]
     for idx, region in enumerate(regions, 1):
         name = html.escape(str(region.get("region_name", "N/A")))
@@ -230,9 +232,11 @@ def render_bucket_info_telegram(data: Dict[str, Any]) -> str:
 
     lines = [
         "<b>🪣 存储桶总览</b>",
-        f"📊 Bucket 总数：<code>{int(data.get('bucket_count', len(buckets)))}</code>",
-        f"📦 Namespace：<code>{namespace}</code>",
-        f"🪪 Profile：<code>{profile}</code>",
+        "<blockquote>"
+        f"📊 Bucket 总数：<code>{int(data.get('bucket_count', len(buckets)))}</code>\n"
+        f"📦 Namespace：<code>{namespace}</code>\n"
+        f"🪪 Profile：<code>{profile}</code>"
+        "</blockquote>",
     ]
 
     for idx, bucket in enumerate(buckets, 1):
@@ -385,9 +389,11 @@ def render_audit_events_telegram(data: Dict[str, Any], limit: Optional[int] = No
 
     parts = [
         "<b>📋 审计事件</b>",
-        f"🪪 Profile：<code>{html.escape(str(data.get('profile', 'DEFAULT')))}</code>",
-        f"🏢 Domain：<code>{html.escape(str(data.get('domain_name', 'Default')))}</code>",
-        f"📈 返回：<code>{len(events)}</code> 条",
+        "<blockquote>"
+        f"🪪 Profile：<code>{html.escape(str(data.get('profile', 'DEFAULT')))}</code>\n"
+        f"🏢 Domain：<code>{html.escape(str(data.get('domain_name', 'Default')))}</code>\n"
+        f"📈 返回：<code>{len(events)}</code> 条"
+        "</blockquote>",
     ]
     for event in events[:display_limit]:
         timestamp = safe_get_any(event, "timestamp", default="")

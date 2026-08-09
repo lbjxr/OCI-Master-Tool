@@ -39,7 +39,7 @@ def render_policies_telegram(data: Dict[str, Any]) -> str:
 
     parts = [
         "<b>🛡️ 密码策略看板</b>",
-        f"策略总数: <b>{data['count']}</b>",
+        f"<blockquote>策略总数：<b>{data['count']}</b></blockquote>",
         "",
     ]
 

@@ -365,9 +365,13 @@ class TelegramBotRunner:
             payload["text"] = text
         self._request("answerCallbackQuery", payload)
 
-    def _send_generic_error(self, chat_id: str, message_id: Optional[int] = None) -> None:
+    def _send_generic_error(self, chat_id: str, message_id: Optional[int] = None, retry_callback_data: Optional[str] = None) -> None:
         text = "<b>❌ 操作失败</b>\n请求未完成，请查看服务日志中的错误编号。"
-        keyboard = build_inline_keyboard([[{"text": "🏠 返回主菜单", "callback_data": "menu:home"}]])
+        rows: List[List[Dict[str, str]]] = []
+        if retry_callback_data:
+            rows.append([{"text": "🔄 重试", "callback_data": retry_callback_data}])
+        rows.append([{"text": "🏠 返回主菜单", "callback_data": "menu:home"}])
+        keyboard = build_inline_keyboard(rows)
         if message_id:
             self.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
         else:
@@ -410,38 +414,34 @@ class TelegramBotRunner:
 
     def build_help_text(self) -> str:
         return (
-            "<b>🤖 OCI Master 命令菜单</b>\n"
-            "👋 /start - 欢迎信息\n"
-            "💬 /menu - 显示此菜单\n\n"
+            "<b>🤖 OCI Master 命令菜单</b>\n\n"
             "<b>📊 查询</b>\n"
-            "👤 /user_info - 用户账号信息\n"
-            "💰 /usage_fee - 本月费用账单\n"
-            "🌏 /regions - 已订阅 Region 列表\n"
-            "🪣 /bucket_info - Object Storage / Bucket 信息\n"
-            "📋 /audit_events [数量] - Audit Events\n"
-            "🔐 /policies - 密码策略菜单\n"
-            "🖥️ /instances - 实例信息总览\n"
-            "🔎 /instance_detail 名称或OCID - 查看实例详情\n"
-            "🌐 /instance_network 名称或OCID - 查看实例网络/安全概览\n"
-            "🛡️ /instance_rules 名称或OCID - 查看当前现有入站规则\n"
-            "🧪 /instance_temp_rules 名称或OCID - 查看本工具临时规则\n\n"
+            "<blockquote>"
+            "👤 /user_info — 用户账号信息\n"
+            "💰 /usage_fee — 本月费用账单\n"
+            "🌏 /regions — 已订阅 Region 列表\n"
+            "🪣 /bucket_info — Object Storage / Bucket 信息\n"
+            "📋 /audit_events [数量] — Audit Events\n"
+            "🔐 /policies — 密码策略菜单\n"
+            "🖥️ /instances — 实例信息总览\n"
+            "🔎 /instance_detail 名称或OCID — 查看实例详情\n"
+            "🌐 /instance_network 名称或OCID — 查看实例网络/安全概览\n"
+            "🛡️ /instance_rules 名称或OCID — 查看当前现有入站规则\n"
+            "🧪 /instance_temp_rules 名称或OCID — 查看本工具临时规则"
+            "</blockquote>\n\n"
             "<b>🛡️ 网络 / 安全</b>\n"
-            "🔓 /netsec_open 实例 端口 CIDR - 预览+确认新增临时入站规则\n"
-            "🧹 /netsec_close_temp 实例 端口 CIDR - 预览+确认删除临时规则\n\n"
+            "<blockquote>"
+            "🔓 /netsec_open 实例 端口 CIDR — 预览+确认新增临时入站规则\n"
+            "🧹 /netsec_close_temp 实例 端口 CIDR — 预览+确认删除临时规则"
+            "</blockquote>\n\n"
             "<b>🛠️ 管理</b>\n"
-            "▶️ /instance_start 名称或OCID - 启动实例\n"
-            "⏹️ /instance_stop 名称或OCID - 停止实例\n"
-            "🔄 /instance_restart 名称或OCID - 重启实例\n\n"
+            "<blockquote>"
+            "▶️ /instance_start 名称或OCID — 启动实例\n"
+            "⏹️ /instance_stop 名称或OCID — 停止实例\n"
+            "🔄 /instance_restart 名称或OCID — 重启实例"
+            "</blockquote>\n\n"
             "<b>⚙️ 兼容入口</b>\n"
-            "<code>/run policies</code>\n"
-            "<code>/run region_subscriptions</code>\n"
-            "<code>/run bucket_info</code>\n"
-            "<code>/run audit_events[:10]</code>\n"
-            "<code>/run list_instances</code>\n"
-            "<code>/run instance_detail:&lt;名称或OCID&gt;</code>\n"
-            "<code>/run instance_network:&lt;名称或OCID&gt;</code>\n"
-            "<code>/run instance_rules:&lt;名称或OCID&gt;</code>\n"
-            "<code>/run instance_temp_rules:&lt;名称或OCID&gt;</code>"
+            "<blockquote><code>/run &lt;action&gt;</code> — 支持所有已注册 CLI action</blockquote>"
         )
 
     def build_main_menu_keyboard(self) -> Dict[str, Any]:
@@ -973,7 +973,7 @@ class TelegramBotRunner:
         if data == "menu:netsec_help":
             return (
                 "<b>🌐 网络 / 安全入口</b>\n"
-                "<blockquote>这条线已经接进来了，只是需要先选实例。</blockquote>\n"
+                "<blockquote>网络与安全功能需要先选择实例。</blockquote>\n"
                 "<b>推荐入口</b>\n"
                 "• 先点 <b>🖥️ 实例列表</b>，再进某台实例的 <b>🌐 网络/安全</b>\n"
                 "• 或直接用命令：<code>/instance_network 实例名</code>\n\n"
@@ -1617,7 +1617,12 @@ class TelegramBotRunner:
                     policy_name = text.strip()
                     ok, error = validate_policy_name(policy_name)
                     if not ok:
-                        self.send_message(chat_id, f"❌ {error}", parse_mode="HTML")
+                        self.send_message(
+                            chat_id,
+                            f"❌ {error}",
+                            parse_mode="HTML",
+                            reply_markup=build_inline_keyboard([[{"text": "🏠 返回主菜单", "callback_data": "menu:home"}]]),
+                        )
                         return
                     state["policy_name"] = policy_name
                     state["step"] = "create_wait_days"
@@ -1627,7 +1632,12 @@ class TelegramBotRunner:
                 if step == "create_wait_days_custom":
                     ok, days, error = validate_expires_days(text.strip())
                     if not ok:
-                        self.send_message(chat_id, f"❌ {error}", parse_mode="HTML")
+                        self.send_message(
+                            chat_id,
+                            f"❌ {error}",
+                            parse_mode="HTML",
+                            reply_markup=build_inline_keyboard([[{"text": "⬅️ 返回上一步", "callback_data": "pm:create:back_to_days"}, {"text": "🏠 主菜单", "callback_data": "menu:home"}]]),
+                        )
                         return
                     policy_name = str(state.get("policy_name", ""))
                     state["expires_days"] = days
@@ -1816,7 +1826,12 @@ class TelegramBotRunner:
                 normalized = text.strip()
                 instance_ref = self._extract_tail_argument(normalized)
                 if not instance_ref:
-                    self.send_message(chat_id, "<b>🌐 网络 / 安全向导</b>\n请提供实例名称或 OCID，例如：<code>/instance_network my-vm</code>", parse_mode="HTML")
+                    self.send_message(
+                        chat_id,
+                        "<b>🌐 网络 / 安全向导</b>\n请提供实例名称或 OCID，例如：<code>/instance_network my-vm</code>",
+                        parse_mode="HTML",
+                        reply_markup=build_inline_keyboard([[{"text": "🏠 返回主菜单", "callback_data": "menu:home"}]]),
+                    )
                     return
                 overview = get_instance_network_overview_data(instance_ref, self.app_config)
                 self._remember_instance_like(overview["instance"])
@@ -1831,7 +1846,12 @@ class TelegramBotRunner:
                 normalized = text.strip()
                 instance_ref = self._extract_tail_argument(normalized)
                 if not instance_ref:
-                    self.send_message(chat_id, "<b>🛡️ 网络 / 安全向导</b>\n请提供实例名称或 OCID，例如：<code>/instance_rules my-vm</code>", parse_mode="HTML")
+                    self.send_message(
+                        chat_id,
+                        "<b>🛡️ 网络 / 安全向导</b>\n请提供实例名称或 OCID，例如：<code>/instance_rules my-vm</code>",
+                        parse_mode="HTML",
+                        reply_markup=build_inline_keyboard([[{"text": "🏠 返回主菜单", "callback_data": "menu:home"}]]),
+                    )
                     return
                 rule_data = get_instance_ingress_rules_data(instance_ref, self.app_config, page=1, temp_only=False)
                 self._remember_instance_like(rule_data["instance"])
@@ -1841,7 +1861,12 @@ class TelegramBotRunner:
                 normalized = text.strip()
                 instance_ref = self._extract_tail_argument(normalized)
                 if not instance_ref:
-                    self.send_message(chat_id, "<b>🧪 网络 / 安全向导</b>\n请提供实例名称或 OCID，例如：<code>/instance_temp_rules my-vm</code>", parse_mode="HTML")
+                    self.send_message(
+                        chat_id,
+                        "<b>🧪 网络 / 安全向导</b>\n请提供实例名称或 OCID，例如：<code>/instance_temp_rules my-vm</code>",
+                        parse_mode="HTML",
+                        reply_markup=build_inline_keyboard([[{"text": "🏠 返回主菜单", "callback_data": "menu:home"}]]),
+                    )
                     return
                 rule_data = get_instance_ingress_rules_data(instance_ref, self.app_config, page=1, temp_only=True)
                 self._remember_instance_like(rule_data["instance"])
