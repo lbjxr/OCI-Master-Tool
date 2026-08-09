@@ -80,12 +80,15 @@
 OCI Master 不是一堆零散脚本的拼装，而是一个更适合日常运维的轻量控制台：
 
 - **双入口体验**：既能本地 CLI 交互，也能直接通过 Telegram Bot 远程操作
+- **插件化架构**：新增功能只需注册 handler，无需修改 `app.py` 或 `telegram_bot.py`
 - **实例运维闭环**：列表、详情、启停重启、动作后状态复查，一条链跑通
 - **网络安全可控**：支持低风险临时放行单个 TCP 端口，带预览 / 确认 / 回执
 - **对象存储可视化查看**：Bucket 基础信息、对象数量、容量估算、版本控制等一屏直达
 - **审计可追溯**：支持 Identity Domain Audit Events 只读查询
+- **密码策略管理**：Telegram 菜单式查看/创建/删除密码策略
 - **多账号配置友好**：支持 profile 化配置，便于多租户 / 多环境管理
-- **部署务实**：不依赖系统 Python 环境“完美无缺”，项目自带本地依赖目录方案
+- **安全优先**：Telegram 鉴权 fail-closed、systemd 沙箱、凭证脱敏、专用非 root 用户
+- **部署务实**：项目自带 venv，依赖锁定，不污染系统 Python
 
 ---
 
@@ -164,6 +167,12 @@ OCI Master 想解决的不是“所有事情”，而是**最常见、最高频�
 - 命令式 action 入口
 - Telegram Bot 命令入口
 
+### 密码策略管理
+
+- 密码策略看板
+- 创建策略（自定义名称与过期天数）
+- 删除策略
+
 ---
 
 ## 🧭 适用场景
@@ -179,15 +188,18 @@ OCI Master 适合这些场景：
 
 ## 🏗️ 运行约定
 
-这个项目当前**不依赖系统 Python 环境完整性**。
+项目使用独立 Python 虚拟环境，与系统 Python 隔离：
 
-由于宿主机 `/usr/bin/python3` 缺少完整 `venv/pip` 能力，项目采用以下运行方式：
+- 运行解释器：`/opt/oci-tool/.venv/bin/python`
+- 依赖锁定：`requirements.lock`（`oci==2.152.1`, `requests==2.33.1`）
+- 启动脚本：`run_oci_master.sh` 自动使用 `.venv` 解释器
+- systemd 服务：已配置专用 `oci-master` 用户 + 沙箱（`NoNewPrivileges`/`PrivateTmp`/`ProtectSystem=strict`）
 
-- 运行解释器：`/usr/local/python3/bin/python3.14`
-- 项目本地依赖目录：`./.deps`
-- 兼容入口：`OCI_Master.py` 会自动把 `./.deps` 注入 `sys.path`
+首次部署或更新依赖后，运行：
 
-也就是说，正常情况下直接运行本文档里的命令即可，**不需要手工拼 `PYTHONPATH`**。
+```bash
+/opt/oci-tool/.venv/bin/python -m pip install -r requirements.lock
+```
 
 ---
 
@@ -197,11 +209,27 @@ OCI Master 适合这些场景：
 OCI-Master-Tool/
 ├── OCI_Master.py                  # 兼容入口
 ├── oci_master/                    # 主代码包
+│   ├── app.py                     # CLI 入口与菜单（解耦到注册表）
+│   ├── telegram_bot.py            # Telegram Bot（解耦到注册表）
+│   ├── registry.py                # 插件注册表（新增功能只需注册）
+│   ├── action_dispatch.py         # CLI/Telegram 共享 action 解析
+│   ├── config.py                  # 统一配置管理
+│   ├── utils.py                   # 通用工具函数
 │   └── services/                  # 业务模块
+│       ├── user_info.py
+│       ├── billing.py
+│       ├── tenant_insights.py
+│       ├── instances.py
+│       ├── network_security.py
+│       └── policies.py
+├── tests/                           # 单元测试（59/59 通过）
+├── scripts/
+│   └── setup_systemd.sh           # systemd 安装脚本（含沙箱配置）
 ├── oci_master_config.json         # 实际配置
 ├── oci_master_config.example.json # 配置示例
-├── .deps/                         # 项目本地 Python 依赖目录
-└── run_oci_master.sh              # 推荐启动脚本
+├── requirements.lock              # 锁定依赖
+├── run_oci_master.sh            # 推荐启动脚本
+└── .venv/                         # 项目独立 Python 虚拟环境
 ```
 
 ---
@@ -283,23 +311,23 @@ OCI-Master-Tool/
 ## 🤖 Telegram 支持命令
 
 ```text
-/user_info
-/usage_fee
-/regions
-/bucket_info
-/audit_events 10
-/policies
-/create_safe_policy
-/delete_policy 名称
-/instances
-/instance_detail <名称|OCID>
-/instance_start <名称|OCID>
-/instance_stop <名称|OCID>
-/instance_restart <名称|OCID>
-/instance_network <名称|OCID>
-/netsec_open <名称|OCID> <端口> <CIDR>
-/netsec_close_temp <名称|OCID> <端口> <CIDR>
-/run <action>
+/user_info                    # 用户账号信息
+/usage_fee                   # 本月费用账单
+/regions                     # 已订阅 Region 列表
+/bucket_info                 # Object Storage / Bucket 信息
+/audit_events [N]            # Audit Events（默认 10 条）
+/policies                    # 密码策略菜单（查看/创建/删除）
+/instances                   # 实例信息总览（支持分页）
+/instance_detail <名称|OCID> # 查看实例详情
+/instance_start <名称|OCID> # 启动实例
+/instance_stop <名称|OCID>   # 停止实例
+/instance_restart <名称|OCID> # 重启实例
+/instance_network <名称|OCID> # 查看实例网络/安全概览
+/instance_rules <名称|OCID>   # 查看当前现有入站规则
+/instance_temp_rules <名称|OCID> # 查看本工具临时规则
+/netsec_open <名称|OCID> <端口> <CIDR>    # 预览+确认新增临时入站规则
+/netsec_close_temp <名称|OCID> <端口> <CIDR> # 预览+确认删除临时规则
+/run <action>                # 兼容入口，支持所有已注册 CLI action
 ```
 
 ---
@@ -327,7 +355,7 @@ OCI-Master-Tool/
   "active_profile": "DEFAULT",
   "profiles": {
     "DEFAULT": {
-      "config_file": "/root/.oci/config",
+      "config_file": "/etc/oci-master/oci-config",
       "profile_name": "DEFAULT",
       "identity_domain_name": "Default",
       "instance_defaults": {
@@ -335,6 +363,10 @@ OCI-Master-Tool/
         "default_compartment_names": ["Prod"]
       }
     }
+  },
+  "telegram": {
+    "allowed_chat_ids": ["123456789"],
+    "allowed_user_ids": ["987654321"]
   },
   "instances": {
     "telegram_page_size": 8,
@@ -468,11 +500,45 @@ oci-master-temp
 ## ⚠️ 已知注意事项
 
 - `OCI_Master.py` 启动时会尝试清屏；在无 `TERM` 环境下可能看到 `TERM environment variable not set`，**不影响功能**
-- 如果要做长期部署，建议补一个 systemd service，把 `run_oci_master.sh telegram` 收成正式服务
+- systemd 服务已配置完成，使用 `systemctl status oci-master-telegram.service` 查看状态
 - Audit Events 依赖当前 profile 对 Identity Domain 审计接口有权限；若租户 / 域权限不足，会直接报 OCI / HTTP 错误
 - Object Storage 的统计字段使用 `approximateCount / approximateSize`，属于 OCI 近似值，不保证秒级精确
 - 当前快捷网络修改优先选主 VNIC 关联的第一个 NSG；若主 VNIC 没有 NSG，则回落到主 VNIC 所在 Subnet 的第一个 Security List
 - 这是一个有意保守的上线策略：**先覆盖高频低风险场景，不碰附属 VNIC / IPv6 / 更复杂拓扑**
+
+---
+
+## 🧪 测试与验证
+
+项目包含 59 个单元测试，覆盖注册表、菜单键盘、错误处理、各服务模块：
+
+```bash
+/opt/oci-tool/.venv/bin/python -m unittest discover -s tests -q
+```
+
+当前基线：59/59 通过。
+
+---
+
+## 🔌 插件注册表（扩展开发）
+
+项目使用 `oci_master/registry.py` 提供的注册表机制扩展功能：
+
+```python
+from oci_master import registry
+
+def my_feature_cli(args, app_config):
+    return "结果"
+
+def my_feature_telegram(runner, data, chat_id, user_id, message_id):
+    return "<b>结果</b>", runner.build_main_menu_keyboard()
+
+registry.register_cli("my_feature", my_feature_cli, "我的功能")
+registry.register_menu("my_feature", "🆕 我的功能", callback_data="menu:my_feature")
+registry.register_telegram_callback("menu:my_feature", my_feature_telegram)
+```
+
+新增功能无需修改 `app.py` 或 `telegram_bot.py`。
 
 ---
 
