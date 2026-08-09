@@ -8,6 +8,7 @@ import requests
 
 from oci_master.config import get_instance_runtime_config, get_network_runtime_config, get_telegram_runtime_config
 from oci_master.action_dispatch import parse_action
+from oci_master import registry
 from oci_master.services.billing import get_usage_fee_report_data, render_usage_fee_telegram
 from oci_master.services.instances import (
     _paginate_items,
@@ -1093,6 +1094,11 @@ class TelegramBotRunner:
             return
 
         try:
+            if registry.dispatch_telegram_callback(
+                self, data, chat_id, user_id, str(message_id), callback_query_id
+            ):
+                return
+
             if self._handle_usage_fee_callback(callback_query_id, chat_id, message_id, data):
                 return
 
