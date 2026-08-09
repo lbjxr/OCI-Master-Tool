@@ -2,7 +2,10 @@ oci_master_config.json
 .env
 __pycache__/
 backups/
+.restart-backups/
+.hermes/
 *.bak
 *.bak-*
 *.bak_*
 .telegram_menu_sessions.json
+boot_context.json

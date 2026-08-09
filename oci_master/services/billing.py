@@ -1,3 +1,4 @@
+import hashlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -75,8 +76,9 @@ def export_usage_fee(app_config: Optional[Dict[str, Any]] = None) -> None:
             hidden_days = len(unique_dates) - display_days
             print()
             print(f"ℹ️ 已折叠更早的 {hidden_days} 天数据；当前默认仅展示最近 {display_days} 天。")
-    except Exception as e:
-        print(f"❌ 运行出错: {e}")
+    except Exception as exc:
+        error_code = hashlib.sha256(type(exc).__name__.encode("utf-8")).hexdigest()[:8].upper()
+        print(f"❌ 运行出错，请稍后重试（错误编号：{error_code}）")
 
 
 def get_usage_fee_report_data(app_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

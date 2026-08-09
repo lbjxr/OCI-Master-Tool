@@ -3,6 +3,7 @@ import time
 from typing import Any, Dict, List, Optional, Sequence
 
 import oci
+import requests
 
 from oci_master.clients import get_compute_client, get_virtual_network_client
 from oci_master.config import (
@@ -34,6 +35,14 @@ TRANSITION_STATES = {
     "TERMINATED",
     "RESETTING",
 }
+
+_RECOVERABLE_QUERY_ERRORS = (
+    oci.exceptions.ServiceError,
+    oci.exceptions.RequestException,
+    requests.exceptions.RequestException,
+    TimeoutError,
+    ConnectionError,
+)
 
 
 def _list_accessible_compartments(identity_client, tenancy_id: str) -> List[Any]:
@@ -85,11 +94,11 @@ def _build_scope_label(app_config: Optional[Dict[str, Any]] = None) -> str:
     return "、".join(labels) if labels else "全部可访问 Compartment"
 
 
-def _collect_instances(app_config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+def _collect_instances(app_config: Optional[Dict[str, Any]] = None, include_network: bool = True) -> List[Dict[str, Any]]:
     config = get_oci_config(app_config)
     compute_client = get_compute_client(config)
     identity_client = oci.identity.IdentityClient(config)
-    network_client = get_virtual_network_client(config)
+    network_client = get_virtual_network_client(config) if include_network else None
 
     tenancy_id = config["tenancy"]
     compartments = _filter_compartments(_list_accessible_compartments(identity_client, tenancy_id), app_config)
@@ -110,17 +119,19 @@ def _collect_instances(app_config: Optional[Dict[str, Any]] = None) -> List[Dict
             seen_instance_ids.add(instance_id)
 
             vnic_ip = "N/A"
-            try:
-                attachments = oci.pagination.list_call_get_all_results(
-                    compute_client.list_vnic_attachments,
-                    compartment_id=compartment_id,
-                    instance_id=instance_id,
-                ).data
-                if attachments:
-                    vnic = network_client.get_vnic(attachments[0].vnic_id).data
-                    vnic_ip = getattr(vnic, "public_ip", None) or getattr(vnic, "private_ip", "N/A")
-            except Exception:
-                vnic_ip = "N/A"
+            if include_network:
+                try:
+                    assert network_client is not None
+                    attachments = oci.pagination.list_call_get_all_results(
+                        compute_client.list_vnic_attachments,
+                        compartment_id=compartment_id,
+                        instance_id=instance_id,
+                    ).data
+                    if attachments:
+                        vnic = network_client.get_vnic(attachments[0].vnic_id).data
+                        vnic_ip = getattr(vnic, "public_ip", None) or getattr(vnic, "private_ip", "N/A")
+                except _RECOVERABLE_QUERY_ERRORS:
+                    vnic_ip = "N/A"
 
             instances.append(
                 {
@@ -139,6 +150,34 @@ def _collect_instances(app_config: Optional[Dict[str, Any]] = None) -> List[Dict
 
     instances.sort(key=lambda x: (x["compartment_name"], x["display_name"]))
     return instances
+
+
+def _instance_from_detail(detail: Any, config: Dict[str, Any]) -> Dict[str, Any]:
+    compartment_id = getattr(detail, "compartment_id", "N/A")
+    return {
+        "id": detail.id,
+        "display_name": getattr(detail, "display_name", detail.id),
+        "lifecycle_state": getattr(detail, "lifecycle_state", "UNKNOWN"),
+        "shape": getattr(detail, "shape", "N/A"),
+        "compartment_id": compartment_id,
+        "compartment_name": getattr(detail, "compartment_name", compartment_id),
+        "availability_domain": getattr(detail, "availability_domain", "N/A"),
+        "region": config.get("region", "N/A"),
+        "time_created": getattr(detail, "time_created", None),
+        "ip_address": "N/A",
+    }
+
+
+def _lookup_instance(instance_ref: str, app_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Resolve an OCID directly; use a metadata-only list for human names."""
+    needle = (instance_ref or "").strip()
+    if not needle:
+        raise ValueError("实例标识不能为空，可传实例名称或 OCID")
+    config = get_oci_config(app_config)
+    compute_client = get_compute_client(config)
+    if needle.lower().startswith("ocid1.instance."):
+        return _instance_from_detail(compute_client.get_instance(needle).data, config)
+    return _resolve_instance(_collect_instances(app_config, include_network=False), needle)
 
 
 def _resolve_instance(instances: List[Dict[str, Any]], instance_ref: str) -> Dict[str, Any]:
@@ -203,7 +242,7 @@ def _recheck_instance_state(instance_id: str, app_config: Optional[Dict[str, Any
         try:
             state = _fetch_instance_state(instance_id, app_config)
             return {"state": state, "recheck_delay_seconds": delay, "recheck_error": None}
-        except Exception as exc:
+        except _RECOVERABLE_QUERY_ERRORS as exc:
             last_error = str(exc)
     return {"state": None, "recheck_delay_seconds": sum(delays), "recheck_error": last_error}
 
@@ -214,7 +253,7 @@ def _is_transition_state(state: Any) -> bool:
 
 
 def list_instances_data(app_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    instances = _collect_instances(app_config)
+    instances = _collect_instances(app_config, include_network=False)
     return {
         "profile": get_active_profile_name(app_config or {}),
         "count": len(instances),
@@ -306,11 +345,14 @@ def list_instances(app_config: Optional[Dict[str, Any]] = None) -> None:
 
 
 def get_instance_detail_data(instance_ref: str, app_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    data = list_instances_data(app_config)
-    instance = _resolve_instance(data["items"], instance_ref)
     config = get_oci_config(app_config)
     compute_client = get_compute_client(config)
-    detail = compute_client.get_instance(instance["id"]).data
+    if (instance_ref or "").strip().lower().startswith("ocid1.instance."):
+        detail = compute_client.get_instance(instance_ref.strip()).data
+        instance = _instance_from_detail(detail, config)
+    else:
+        instance = _lookup_instance(instance_ref, app_config)
+        detail = compute_client.get_instance(instance["id"]).data
 
     return {
         **instance,
@@ -418,8 +460,7 @@ def execute_instance_action_data(action: str, instance_ref: str, app_config: Opt
     if not oci_action:
         raise ValueError(f"不支持的实例动作: {action}")
 
-    data = list_instances_data(app_config)
-    instance = _resolve_instance(data["items"], instance_ref)
+    instance = _lookup_instance(instance_ref, app_config)
     config = get_oci_config(app_config)
     compute_client = get_compute_client(config)
     response = compute_client.instance_action(instance["id"], oci_action)

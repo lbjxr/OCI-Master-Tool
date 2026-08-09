@@ -1,7 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-import OCI_Master
+from oci_master.services import tenant_insights
+from oci_master.telegram_bot import TelegramBotRunner
 
 
 class BucketInfoTests(unittest.TestCase):
@@ -27,7 +28,7 @@ class BucketInfoTests(unittest.TestCase):
             ],
         }
 
-        text = OCI_Master.render_bucket_info_telegram(data)
+        text = tenant_insights.render_bucket_info_telegram(data)
         self.assertIn("存储桶总览", text)
         self.assertIn("Bucket 总数", text)
         self.assertIn("logs-bucket", text)
@@ -80,20 +81,20 @@ class BucketInfoTests(unittest.TestCase):
             ],
         }
 
-        text = OCI_Master.render_bucket_info_telegram(data)
+        text = tenant_insights.render_bucket_info_telegram(data)
         self.assertIn("1. 🪣 a-bucket", text)
         self.assertIn("2. 🪣 b-bucket", text)
-        self.assertEqual(text.count("📁 Compartment:"), 2)
-        self.assertEqual(text.count("🕒 创建时间:"), 2)
-        self.assertEqual(text.count("🌐 访问:"), 2)
-        self.assertEqual(text.count("🧬 版本控制:"), 2)
-        self.assertEqual(text.count("📦 对象/容量:"), 2)
+        self.assertEqual(text.count("📁 Compartment："), 2)
+        self.assertEqual(text.count("🕒 创建时间："), 2)
+        self.assertEqual(text.count("🌐 访问："), 2)
+        self.assertEqual(text.count("🧬 版本控制："), 2)
+        self.assertEqual(text.count("📦 对象/容量："), 2)
 
     def test_handle_command_bucket_info_dispatch(self):
-        with patch("OCI_Master.get_bucket_info_data", return_value={"namespace": "myns", "profile": "DEFAULT", "bucket_count": 0, "buckets": []}), patch(
-            "OCI_Master.render_bucket_info_telegram", return_value="bucket-ok"
+        with patch("oci_master.telegram_bot.get_bucket_info_data", return_value={"namespace": "myns", "profile": "DEFAULT", "bucket_count": 0, "buckets": []}), patch(
+            "oci_master.telegram_bot.render_bucket_info_telegram", return_value="bucket-ok"
         ):
-            bot = OCI_Master.TelegramBotRunner({"telegram": {"enabled": False}})
+            bot = TelegramBotRunner({"telegram": {"enabled": False}})
             self.assertEqual(bot.handle_command("/bucket_info"), "bucket-ok")
 
     def test_get_bucket_info_data_collects_bucket_details(self):
@@ -166,10 +167,13 @@ class BucketInfoTests(unittest.TestCase):
                 }
                 return type("Resp", (), {"data": payload[bucket_name]})()
 
-        with patch("OCI_Master.get_oci_config", return_value={"tenancy": "ocid1.tenancy.oc1..root", "region": "ap-tokyo-1"}), patch(
-            "OCI_Master.oci.identity.IdentityClient", FakeIdentityClient
-        ), patch("OCI_Master.oci.object_storage.ObjectStorageClient", FakeObjectStorageClient):
-            data = OCI_Master.get_bucket_info_data({"oci": {"profile_name": "DEFAULT"}})
+        with patch("oci_master.services.tenant_insights.get_oci_config", return_value={"tenancy": "ocid1.tenancy.oc1..root", "region": "ap-tokyo-1"}), patch(
+            "oci_master.services.tenant_insights.oci.identity.IdentityClient", FakeIdentityClient
+        ), patch("oci_master.services.tenant_insights.oci.object_storage.ObjectStorageClient", FakeObjectStorageClient), patch(
+            "oci_master.services.tenant_insights.oci.pagination.list_call_get_all_results",
+            return_value=FakeListResp([{"id": "ocid1.compartment.oc1..child", "name": "ChildComp"}]),
+        ):
+            data = tenant_insights.get_bucket_info_data({"oci": {"profile_name": "DEFAULT"}})
 
         self.assertEqual(data["namespace"], "testns")
         self.assertEqual(data["bucket_count"], 2)

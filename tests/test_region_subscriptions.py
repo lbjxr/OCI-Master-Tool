@@ -1,7 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-import OCI_Master
+from oci_master.services import tenant_insights
+from oci_master.telegram_bot import TelegramBotRunner
 
 
 class RegionSubscriptionsTests(unittest.TestCase):
@@ -31,10 +32,10 @@ class RegionSubscriptionsTests(unittest.TestCase):
             },
         ]
 
-        with patch("OCI_Master.get_oci_config", return_value={"tenancy": "ocid1.tenancy", "region": "ap-tokyo-1"}), patch(
-            "OCI_Master.oci.identity.IdentityClient", FakeIdentityClient
-        ), patch("OCI_Master._normalize_collection_items", return_value=fake_regions):
-            data = OCI_Master.get_region_subscriptions_data({"oci": {"profile_name": "DEFAULT"}})
+        with patch("oci_master.services.tenant_insights.get_oci_config", return_value={"tenancy": "ocid1.tenancy", "region": "ap-tokyo-1"}), patch(
+            "oci_master.services.tenant_insights.oci.identity.IdentityClient", FakeIdentityClient
+        ), patch("oci_master.services.tenant_insights._normalize_collection_items", return_value=fake_regions):
+            data = tenant_insights.get_region_subscriptions_data({"oci": {"profile_name": "DEFAULT"}})
 
         self.assertEqual(data["total_regions"], 2)
         self.assertEqual(data["home_region"], "ap-tokyo-1")
@@ -60,17 +61,17 @@ class RegionSubscriptionsTests(unittest.TestCase):
                 },
             ],
         }
-        text = OCI_Master.render_region_subscriptions_telegram(data)
+        text = tenant_insights.render_region_subscriptions_telegram(data)
         self.assertIn("OCI 订阅区域", text)
         self.assertIn("HOME", text)
         self.assertIn("ap-tokyo-1", text)
         self.assertIn("us-ashburn-1", text)
 
     def test_handle_command_regions_dispatch(self):
-        with patch("OCI_Master.get_region_subscriptions_data", return_value={"home_region": "ap-tokyo-1", "total_regions": 1, "regions": []}), patch(
-            "OCI_Master.render_region_subscriptions_telegram", return_value="ok"
+        with patch("oci_master.telegram_bot.get_region_subscriptions_data", return_value={"home_region": "ap-tokyo-1", "total_regions": 1, "regions": []}), patch(
+            "oci_master.telegram_bot.render_region_subscriptions_telegram", return_value="ok"
         ):
-            bot = OCI_Master.TelegramBotRunner({"telegram": {"enabled": False}})
+            bot = TelegramBotRunner({"telegram": {"enabled": False}})
             self.assertEqual(bot.handle_command("/regions"), "ok")
 
 

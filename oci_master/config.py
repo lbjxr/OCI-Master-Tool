@@ -8,6 +8,10 @@ import oci
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_APP_CONFIG_PATH = os.path.join(BASE_DIR, "oci_master_config.json")
 DEFAULT_APP_CONFIG_EXAMPLE_PATH = os.path.join(BASE_DIR, "oci_master_config.example.json")
+DEFAULT_TELEGRAM_RUNTIME = {
+    "poll_interval_seconds": 3,
+    "initial_update_offset": 0,
+}
 
 
 def load_app_config(config_path: Optional[str] = None) -> Dict[str, Any]:
@@ -135,4 +139,22 @@ def get_network_runtime_config(app_config: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "quick_open_allowed_tcp_ports": normalized_ports,
         "default_source_cidr": str(network_cfg.get("default_source_cidr", "0.0.0.0/0") or "0.0.0.0/0"),
+        "allow_public_cidr": bool(network_cfg.get("allow_public_cidr", False)),
     }
+
+
+def get_telegram_runtime_config(app_config: Dict[str, Any]) -> Dict[str, Any]:
+    telegram_cfg = dict((app_config or {}).get("telegram", {}))
+    runtime = dict(DEFAULT_TELEGRAM_RUNTIME)
+    for key in runtime:
+        if key in telegram_cfg:
+            runtime[key] = telegram_cfg[key]
+    try:
+        runtime["poll_interval_seconds"] = max(1, int(runtime["poll_interval_seconds"]))
+    except (TypeError, ValueError):
+        runtime["poll_interval_seconds"] = DEFAULT_TELEGRAM_RUNTIME["poll_interval_seconds"]
+    try:
+        runtime["initial_update_offset"] = int(runtime["initial_update_offset"])
+    except (TypeError, ValueError):
+        runtime["initial_update_offset"] = DEFAULT_TELEGRAM_RUNTIME["initial_update_offset"]
+    return runtime

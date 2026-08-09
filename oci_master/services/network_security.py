@@ -10,7 +10,7 @@ from oci_master.config import (
     get_network_runtime_config,
     get_oci_config,
 )
-from oci_master.services.instances import _collect_instances, _resolve_instance
+from oci_master.services.instances import _collect_instances, _lookup_instance, _resolve_instance
 from oci_master.utils import build_text_table, format_datetime_compact, print_kv, print_section, truncate_text
 
 TCP_PROTOCOL = "6"
@@ -271,49 +271,51 @@ def apply_cleanup_selected_temp_rules_data(instance_ref: str, rule_keys: Sequenc
         selected_indexes = {str(item["rule_key"]).split("#", 1)[1] for item in items}
         if target["target_type"] == "nsg":
             nsg = network_client.get_network_security_group(target["target_id"]).data
-            keep_rules: List[Any] = []
+            remove_ids: List[str] = []
             for index, rule in enumerate(list(getattr(nsg, "security_rules", []) or []), start=1):
                 if str(index) in selected_indexes and str(getattr(rule, "direction", "") or "INGRESS").upper() == "INGRESS" and _is_temp_rule(rule):
-                    removed_count += 1
+                    rule_id = str(getattr(rule, "id", "") or "").strip()
+                    if rule_id:
+                        remove_ids.append(rule_id)
                     continue
-                keep_rules.append(
-                    oci.core.models.UpdateSecurityRuleDetails(
-                        id=getattr(rule, "id", None),
-                        description=getattr(rule, "description", None),
-                        direction=getattr(rule, "direction", None),
-                        protocol=getattr(rule, "protocol", None),
-                        source=getattr(rule, "source", None),
-                        source_type=getattr(rule, "source_type", None),
-                        destination=getattr(rule, "destination", None),
-                        destination_type=getattr(rule, "destination_type", None),
-                        tcp_options=getattr(rule, "tcp_options", None),
-                        udp_options=getattr(rule, "udp_options", None),
-                        icmp_options=getattr(rule, "icmp_options", None),
-                        is_stateless=getattr(rule, "is_stateless", None),
-                    )
+            if remove_ids:
+                network_client.remove_network_security_group_security_rules(
+                    target["target_id"],
+                    oci.core.models.RemoveNetworkSecurityGroupSecurityRulesDetails(security_rule_ids=remove_ids),
                 )
-            network_client.update_network_security_group_security_rules(
-                target["target_id"],
-                oci.core.models.UpdateNetworkSecurityGroupSecurityRulesDetails(security_rules=keep_rules),
-            )
+                refreshed_nsg = network_client.get_network_security_group(target["target_id"]).data
+                remaining_ids = {str(getattr(rule, "id", "")) for rule in getattr(refreshed_nsg, "security_rules", []) or []}
+                if remaining_ids.intersection(remove_ids):
+                    raise RuntimeError("NSG 规则删除后复核失败，目标规则仍存在")
+                removed_count += len(remove_ids)
             continue
-        security_list = network_client.get_security_list(target["target_id"]).data
+        security_list_response = network_client.get_security_list(target["target_id"])
+        security_list = security_list_response.data
+        security_list_etag = (getattr(security_list_response, "headers", {}) or {}).get("etag")
+        if not security_list_etag:
+            raise RuntimeError("Security List 缺少 ETag，已停止更新以避免覆盖并发修改")
         keep_ingress_rules: List[Any] = []
         for index, rule in enumerate(list(getattr(security_list, "ingress_security_rules", []) or []), start=1):
             if str(index) in selected_indexes and _is_temp_rule(rule):
                 removed_count += 1
                 continue
             keep_ingress_rules.append(rule)
-        network_client.update_security_list(
-            target["target_id"],
-            oci.core.models.UpdateSecurityListDetails(
-                display_name=getattr(security_list, "display_name", None),
-                defined_tags=getattr(security_list, "defined_tags", None),
-                freeform_tags=getattr(security_list, "freeform_tags", None),
-                egress_security_rules=list(getattr(security_list, "egress_security_rules", []) or []),
-                ingress_security_rules=keep_ingress_rules,
-            ),
-        )
+        try:
+            network_client.update_security_list(
+                target["target_id"],
+                oci.core.models.UpdateSecurityListDetails(
+                    display_name=getattr(security_list, "display_name", None),
+                    defined_tags=getattr(security_list, "defined_tags", None),
+                    freeform_tags=getattr(security_list, "freeform_tags", None),
+                    egress_security_rules=list(getattr(security_list, "egress_security_rules", []) or []),
+                    ingress_security_rules=keep_ingress_rules,
+                ),
+                if_match=security_list_etag,
+            )
+        except oci.exceptions.ServiceError as exc:
+            if getattr(exc, "status", None) == 412:
+                raise RuntimeError("Security List 在确认后已被其他进程修改，未覆盖外部变更，请重新读取并确认") from exc
+            raise
     overview = _collect_instance_network_objects(instance_ref, app_config)
     return {
         **preview,
@@ -339,8 +341,7 @@ def render_cleanup_selected_result_telegram(result: Dict[str, Any]) -> str:
 
 
 def _collect_instance_network_objects(instance_ref: str, app_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    instances = _collect_instances(app_config)
-    instance = _resolve_instance(instances, instance_ref)
+    instance = _lookup_instance(instance_ref, app_config)
     config = get_oci_config(app_config)
     compute_client = get_compute_client(config)
     network_client = get_virtual_network_client(config)
@@ -744,7 +745,7 @@ def _normalize_port(port: Any, allowed_ports: Sequence[int]) -> int:
     return value
 
 
-def _normalize_source_cidr(source: Optional[str], default_source_cidr: str) -> str:
+def _normalize_source_cidr(source: Optional[str], default_source_cidr: str, allow_public_cidr: bool = False) -> str:
     value = str(source or default_source_cidr or "").strip()
     if not value:
         raise ValueError("必须提供来源 CIDR，例如 1.2.3.4/32")
@@ -760,6 +761,8 @@ def _normalize_source_cidr(source: Optional[str], default_source_cidr: str) -> s
 
     if network.version != 4:
         raise ValueError(f"当前仅支持 IPv4 CIDR，暂不支持：{value}")
+    if str(network) == "0.0.0.0/0" and not allow_public_cidr:
+        raise ValueError("公网 0.0.0.0/0 默认禁止，必须显式启用 allow_public_cidr")
 
     normalized = str(network)
     if "/" not in normalized:
@@ -860,7 +863,7 @@ def preview_open_ingress_rule_data(
 ) -> Dict[str, Any]:
     runtime = get_network_runtime_config(app_config or {})
     normalized_port = _normalize_port(port, runtime["quick_open_allowed_tcp_ports"])
-    normalized_source = _normalize_source_cidr(source_cidr, runtime["default_source_cidr"])
+    normalized_source = _normalize_source_cidr(source_cidr, runtime["default_source_cidr"], runtime["allow_public_cidr"])
     overview = _collect_instance_network_objects(instance_ref, app_config)
     target = _select_target(overview, target_scope)
     description = _build_temp_rule_description(normalized_port, normalized_source, overview["profile"])
@@ -951,10 +954,10 @@ def apply_open_ingress_rule_data(
                 "status": "exists",
                 "message": "已存在同一条临时规则，未重复写入。",
             }
-        update_details = oci.core.models.UpdateNetworkSecurityGroupSecurityRulesDetails(
+        add_details = oci.core.models.AddNetworkSecurityGroupSecurityRulesDetails(
             security_rules=[oci.core.models.AddSecurityRuleDetails(**rule_model)]
         )
-        response = network_client.update_network_security_group_security_rules(target["target_id"], update_details)
+        response = network_client.add_network_security_group_security_rules(target["target_id"], add_details)
         return {
             **preview,
             "applied": True,
@@ -962,7 +965,11 @@ def apply_open_ingress_rule_data(
             "message": "已向 NSG 提交新增入站规则。",
         }
 
-    security_list = network_client.get_security_list(target["target_id"]).data
+    security_list_response = network_client.get_security_list(target["target_id"])
+    security_list = security_list_response.data
+    security_list_etag = (getattr(security_list_response, "headers", {}) or {}).get("etag")
+    if not security_list_etag:
+        raise RuntimeError("Security List 缺少 ETag，已停止更新以避免覆盖并发修改")
     if _rule_exists_in_security_list(security_list, preview["port"], preview["source_cidr"], preview["description"]):
         return {
             **preview,
@@ -980,7 +987,12 @@ def apply_open_ingress_rule_data(
         egress_security_rules=list(getattr(security_list, "egress_security_rules", []) or []),
         ingress_security_rules=ingress_rules,
     )
-    response = network_client.update_security_list(target["target_id"], update_details)
+    try:
+        response = network_client.update_security_list(target["target_id"], update_details, if_match=security_list_etag)
+    except oci.exceptions.ServiceError as exc:
+        if getattr(exc, "status", None) == 412:
+            raise RuntimeError("Security List 在确认后已被其他进程修改，未覆盖外部变更，请重新读取并确认") from exc
+        raise
     return {
         **preview,
         "applied": True,
@@ -1016,7 +1028,7 @@ def preview_cleanup_temp_rules_data(
 ) -> Dict[str, Any]:
     runtime = get_network_runtime_config(app_config or {})
     normalized_port = _normalize_port(port, runtime["quick_open_allowed_tcp_ports"])
-    normalized_source = _normalize_source_cidr(source_cidr, runtime["default_source_cidr"])
+    normalized_source = _normalize_source_cidr(source_cidr, runtime["default_source_cidr"], runtime["allow_public_cidr"])
     overview = _collect_instance_network_objects(instance_ref, app_config)
     target = _select_target(overview, target_scope)
     description = _build_temp_rule_description(normalized_port, normalized_source, overview["profile"])
@@ -1123,39 +1135,35 @@ def apply_cleanup_temp_rules_data(
 
     if target["target_type"] == "nsg":
         nsg = network_client.get_network_security_group(target["target_id"]).data
-        keep_rules: List[Any] = []
-        removed_ids = {item["id"] for item in preview["matched_rules"]}
-        for rule in list(getattr(nsg, "security_rules", []) or []):
-            if str(getattr(rule, "id", "")) in removed_ids:
-                continue
-            keep_rules.append(
-                oci.core.models.UpdateSecurityRuleDetails(
-                    id=getattr(rule, "id", None),
-                    description=getattr(rule, "description", None),
-                    direction=getattr(rule, "direction", None),
-                    protocol=getattr(rule, "protocol", None),
-                    source=getattr(rule, "source", None),
-                    source_type=getattr(rule, "source_type", None),
-                    destination=getattr(rule, "destination", None),
-                    destination_type=getattr(rule, "destination_type", None),
-                    tcp_options=getattr(rule, "tcp_options", None),
-                    udp_options=getattr(rule, "udp_options", None),
-                    icmp_options=getattr(rule, "icmp_options", None),
-                    is_stateless=getattr(rule, "is_stateless", None),
-                )
-            )
-        response = network_client.update_network_security_group_security_rules(
+        remove_ids = [str(item["id"]).strip() for item in preview["matched_rules"] if str(item.get("id", "")).strip()]
+        remove_ids = list(dict.fromkeys(remove_ids))
+        if not remove_ids:
+            return {
+                **preview,
+                "removed_count": 0,
+                "status": "no-match",
+                "message": "匹配规则缺少 OCI 规则 ID，未执行删除。",
+            }
+        response = network_client.remove_network_security_group_security_rules(
             target["target_id"],
-            oci.core.models.UpdateNetworkSecurityGroupSecurityRulesDetails(security_rules=keep_rules),
+            oci.core.models.RemoveNetworkSecurityGroupSecurityRulesDetails(security_rule_ids=remove_ids),
         )
+        refreshed_nsg = network_client.get_network_security_group(target["target_id"]).data
+        remaining_ids = {str(getattr(rule, "id", "")) for rule in getattr(refreshed_nsg, "security_rules", []) or []}
+        if remaining_ids.intersection(remove_ids):
+            raise RuntimeError("NSG 规则删除后复核失败，目标规则仍存在")
         return {
             **preview,
-            "removed_count": len(preview["matched_rules"]),
+            "removed_count": len(remove_ids),
             "status": getattr(response, "status", "N/A"),
             "message": "已从 NSG 删除匹配的临时规则。",
         }
 
-    security_list = network_client.get_security_list(target["target_id"]).data
+    security_list_response = network_client.get_security_list(target["target_id"])
+    security_list = security_list_response.data
+    security_list_etag = (getattr(security_list_response, "headers", {}) or {}).get("etag")
+    if not security_list_etag:
+        raise RuntimeError("Security List 缺少 ETag，已停止更新以避免覆盖并发修改")
     keep_ingress_rules: List[Any] = []
     removed_count = 0
     for rule in list(getattr(security_list, "ingress_security_rules", []) or []):
@@ -1163,16 +1171,22 @@ def apply_cleanup_temp_rules_data(
             removed_count += 1
             continue
         keep_ingress_rules.append(rule)
-    response = network_client.update_security_list(
-        target["target_id"],
-        oci.core.models.UpdateSecurityListDetails(
-            display_name=getattr(security_list, "display_name", None),
-            defined_tags=getattr(security_list, "defined_tags", None),
-            freeform_tags=getattr(security_list, "freeform_tags", None),
-            egress_security_rules=list(getattr(security_list, "egress_security_rules", []) or []),
-            ingress_security_rules=keep_ingress_rules,
-        ),
-    )
+    try:
+        response = network_client.update_security_list(
+            target["target_id"],
+            oci.core.models.UpdateSecurityListDetails(
+                display_name=getattr(security_list, "display_name", None),
+                defined_tags=getattr(security_list, "defined_tags", None),
+                freeform_tags=getattr(security_list, "freeform_tags", None),
+                egress_security_rules=list(getattr(security_list, "egress_security_rules", []) or []),
+                ingress_security_rules=keep_ingress_rules,
+            ),
+            if_match=security_list_etag,
+        )
+    except oci.exceptions.ServiceError as exc:
+        if getattr(exc, "status", None) == 412:
+            raise RuntimeError("Security List 在确认后已被其他进程修改，未覆盖外部变更，请重新读取并确认") from exc
+        raise
     return {
         **preview,
         "removed_count": removed_count,

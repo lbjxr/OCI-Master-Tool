@@ -2,7 +2,7 @@
 set -eu
 
 BASE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-PYTHON_BIN="/usr/local/python3/bin/python3.14"
+PYTHON_BIN="${PYTHON_BIN:-$BASE_DIR/.venv/bin/python}"
 
 if [ ! -x "$PYTHON_BIN" ]; then
   echo "❌ 未找到 Python 解释器: $PYTHON_BIN" >&2

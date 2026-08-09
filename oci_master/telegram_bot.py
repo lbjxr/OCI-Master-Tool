@@ -1,12 +1,13 @@
-import hashlib
 import html
 import os
+import secrets
 import time
 from typing import Any, Dict, List, Optional
 
 import requests
 
-from oci_master.config import get_instance_runtime_config, get_network_runtime_config
+from oci_master.config import get_instance_runtime_config, get_network_runtime_config, get_telegram_runtime_config
+from oci_master.action_dispatch import parse_action
 from oci_master.services.billing import get_usage_fee_report_data, render_usage_fee_telegram
 from oci_master.services.instances import (
     _paginate_items,
@@ -93,38 +94,48 @@ class TelegramBotRunner:
         self.telegram_config = app_config.get("telegram", {})
         self.instance_runtime = get_instance_runtime_config(app_config)
         self.network_runtime = get_network_runtime_config(app_config)
-        self.instance_page_size = int(self.instance_runtime.get("telegram_page_size", 8))
+        self.telegram_runtime = get_telegram_runtime_config(app_config)
+        self.instance_page_size = self.instance_runtime["telegram_page_size"]
         self.enabled = self.telegram_config.get("enabled", False)
         self.bot_token = os.environ.get("OCI_MASTER_BOT_TOKEN") or self.telegram_config.get("bot_token", "")
         self.allowed_chat_ids = {str(item) for item in self.telegram_config.get("allowed_chat_ids", [])}
         self.allowed_user_ids = {str(item) for item in self.telegram_config.get("allowed_user_ids", [])}
-        self.poll_interval = int(self.telegram_config.get("poll_interval_seconds", 3))
+        self.poll_interval = self.telegram_runtime["poll_interval_seconds"]
         self.api_base = f"https://api.telegram.org/bot{self.bot_token}" if self.bot_token else ""
-        self.last_update_id = int(self.telegram_config.get("initial_update_offset", 0))
+        self.last_update_id = self.telegram_runtime["initial_update_offset"]
         self.menu_sessions: Dict[str, Dict[str, Any]] = {}
-        self.callback_refs: Dict[str, str] = {}
+        self.callback_refs: Dict[str, Dict[str, Any]] = {}
         self.instance_display_cache: Dict[str, str] = {}
         self.netsec_flow_refs: Dict[str, Dict[str, Any]] = {}
         self.nav_flow_refs: Dict[str, Dict[str, Any]] = {}
         self.rule_select_refs: Dict[str, Dict[str, Any]] = {}
+        self.dangerous_action_refs: Dict[str, Dict[str, Any]] = {}
         self.rule_selection_sessions: Dict[str, Dict[str, Any]] = {}
+        self.callback_ttl_seconds = 60.0
+        self.callback_capacity = 1024
+        self._active_callback_owner: tuple[str, str] = ("", "")
+        self._startup_notice_sent = False
+        self._update_query_cache: Dict[str, Any] = {}
 
     def validate(self) -> None:
         if not self.enabled:
             raise ValueError("Telegram Bot 未启用，请在配置文件中将 telegram.enabled 设为 true")
         if not self.bot_token:
             raise ValueError("Telegram Bot 缺少 bot_token 配置")
+        if not self.allowed_chat_ids:
+            raise ValueError("Telegram Bot 缺少 allowed_chat_ids 白名单配置，拒绝启动")
+        if not self.allowed_user_ids:
+            raise ValueError("Telegram Bot 缺少 allowed_user_ids 白名单配置，拒绝启动")
 
     def _request(self, method: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         response = requests.post(f"{self.api_base}/{method}", json=payload or {}, timeout=60)
         try:
             response.raise_for_status()
         except requests.HTTPError as exc:
-            body_preview = response.text[:1000]
-            raise requests.HTTPError(f"{exc} | method={method} | body={body_preview}") from exc
+            raise requests.HTTPError(f"Telegram 请求失败: method={method} status={response.status_code}") from exc
         data = response.json()
         if not data.get("ok"):
-            raise ValueError(f"Telegram API 调用失败: method={method} data={data}")
+            raise ValueError(f"Telegram API 调用失败: method={method} error_code={data.get('error_code', 'unknown')}")
         return data
 
     def _menu_key(self, chat_id: str, user_id: str) -> str:
@@ -139,14 +150,75 @@ class TelegramBotRunner:
     def _clear_menu_state(self, chat_id: str, user_id: str) -> None:
         self.menu_sessions.pop(self._menu_key(chat_id, user_id), None)
 
-    def _register_callback_ref(self, value: str, prefix: str = "r") -> str:
-        raw = str(value)
-        token = f"{prefix}{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:16]}"
-        self.callback_refs[token] = raw
+    def _callback_owner(self) -> tuple[str, str]:
+        return self._active_callback_owner
+
+    def _prune_callback_states(self) -> None:
+        now = time.monotonic()
+        stores = (self.callback_refs, self.nav_flow_refs, self.netsec_flow_refs, self.rule_select_refs, self.dangerous_action_refs)
+        for store in stores:
+            expired = [token for token, state in store.items() if now - float(state.get("created_at", 0)) > self.callback_ttl_seconds]
+            for token in expired:
+                store.pop(token, None)
+            while len(store) > self.callback_capacity:
+                store.pop(next(iter(store)))
+
+    def _new_callback_state(self, store: Dict[str, Dict[str, Any]], prefix: str, payload: Dict[str, Any]) -> str:
+        self._prune_callback_states()
+        chat_id, user_id = self._callback_owner()
+        token = f"{prefix}{secrets.token_urlsafe(9)}"
+        store[token] = {**payload, "chat_id": chat_id, "user_id": user_id, "created_at": time.monotonic()}
+        while len(store) > self.callback_capacity:
+            store.pop(next(iter(store)))
         return token
 
+    def _resolve_callback_state(self, store: Dict[str, Dict[str, Any]], token: str, error: str) -> Dict[str, Any]:
+        self._prune_callback_states()
+        state = store.get(token)
+        if not state:
+            raise ValueError(error)
+        chat_id, user_id = self._callback_owner()
+        if not chat_id or not user_id or state.get("chat_id") != chat_id or state.get("user_id") != user_id:
+            raise ValueError("按钮不属于当前用户或聊天")
+        return dict(state)
+
+    def _consume_callback_state(self, store: Dict[str, Dict[str, Any]], token: str, error: str) -> Dict[str, Any]:
+        state = self._resolve_callback_state(store, token, error)
+        store.pop(token, None)
+        return state
+
+    def _register_dangerous_action(self, action: str, target: str) -> str:
+        return self._new_callback_state(
+            self.dangerous_action_refs,
+            "da",
+            {"action": action, "target": str(target)},
+        )
+
+    def _build_dangerous_confirmation_keyboard(self, token: str) -> Dict[str, Any]:
+        return build_inline_keyboard([
+            [{"text": "✅ 确认执行", "callback_data": f"danger:confirm:{token}"}],
+            [{"text": "❌ 取消", "callback_data": "menu:home"}],
+        ])
+
+    def _dangerous_confirmation_text(self, action: str, target: str) -> str:
+        labels = {
+            "instance_stop": "停止实例",
+            "instance_restart": "重启实例",
+            "delete_policy": "删除密码策略",
+        }
+        return (
+            "<b>⚠️ 高风险操作确认</b>\n"
+            f"动作：<b>{html.escape(labels.get(action, action))}</b>\n"
+            f"目标：<code>{html.escape(str(target))}</code>\n"
+            "请确认后才会调用 OCI 写接口。确认按钮 60 秒内有效，且只能使用一次。"
+        )
+
+    def _register_callback_ref(self, value: str, prefix: str = "r") -> str:
+        return self._new_callback_state(self.callback_refs, prefix, {"value": str(value)})
+
     def _resolve_callback_ref(self, token: str) -> str:
-        return self.callback_refs.get(token, token)
+        state = self._resolve_callback_state(self.callback_refs, token, "按钮会话已失效，请重新进入该流程")
+        return str(state["value"])
 
     def _build_instance_page_token(self, page: int) -> str:
         return self._register_callback_ref(str(int(page)), "p")
@@ -208,16 +280,10 @@ class TelegramBotRunner:
         return f"<b>{html.escape(display_name)}</b>"
 
     def _register_nav_flow(self, kind: str, **payload: Any) -> str:
-        raw = kind + "|" + "|".join(f"{k}={payload[k]}" for k in sorted(payload))
-        token = f"nv{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:16]}"
-        self.nav_flow_refs[token] = {"kind": kind, **payload}
-        return token
+        return self._new_callback_state(self.nav_flow_refs, "nv", {"kind": kind, **payload})
 
     def _resolve_nav_flow(self, token: str) -> Dict[str, Any]:
-        flow = self.nav_flow_refs.get(token)
-        if not flow:
-            raise ValueError("导航会话已失效，请重新进入该流程")
-        return dict(flow)
+        return self._resolve_callback_state(self.nav_flow_refs, token, "导航会话已失效，请重新进入该流程")
 
     def _build_netsec_waiting_keyboard(self, action: str, instance_ref: str, port: str, back_page: int = 1, mode: str = "cidr") -> Dict[str, Any]:
         instance_token = self._register_callback_ref(instance_ref, "i")
@@ -298,6 +364,14 @@ class TelegramBotRunner:
             payload["text"] = text
         self._request("answerCallbackQuery", payload)
 
+    def _send_generic_error(self, chat_id: str, message_id: Optional[int] = None) -> None:
+        text = "<b>❌ 操作失败</b>\n请求未完成，请查看服务日志中的错误编号。"
+        keyboard = build_inline_keyboard([[{"text": "🏠 返回主菜单", "callback_data": "menu:home"}]])
+        if message_id:
+            self.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+        else:
+            self.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+
     def build_bot_commands(self) -> List[Dict[str, str]]:
         return [
             {"command": "start", "description": "查看欢迎信息"},
@@ -329,8 +403,8 @@ class TelegramBotRunner:
     def is_authorized(self, message: Dict[str, Any]) -> bool:
         chat_id = str(safe_get(safe_get(message, "chat", {}), "id", ""))
         user_id = str(safe_get(safe_get(message, "from", {}), "id", ""))
-        chat_ok = not self.allowed_chat_ids or chat_id in self.allowed_chat_ids
-        user_ok = not self.allowed_user_ids or user_id in self.allowed_user_ids
+        chat_ok = chat_id in self.allowed_chat_ids
+        user_ok = user_id in self.allowed_user_ids
         return chat_ok and user_ok
 
     def build_help_text(self) -> str:
@@ -378,12 +452,15 @@ class TelegramBotRunner:
             [{"text": "💬 帮助菜单", "callback_data": "menu:help"}],
         ])
 
-    def build_usage_fee_keyboard(self, show_all: bool, unique_dates_count: int, display_days: int) -> Optional[Dict[str, Any]]:
-        if unique_dates_count <= display_days:
-            return None
-        if show_all:
-            return build_inline_keyboard([[{"text": "收起历史数据", "callback_data": "usage_fee:collapse"}]])
-        return build_inline_keyboard([[{"text": "展开全部历史数据", "callback_data": "usage_fee:expand"}]])
+    def build_usage_fee_keyboard(self, show_all: bool, unique_dates_count: int, display_days: int) -> Dict[str, Any]:
+        rows: List[List[Dict[str, str]]] = []
+        if unique_dates_count > display_days:
+            if show_all:
+                rows.append([{"text": "收起历史数据", "callback_data": "usage_fee:collapse"}])
+            else:
+                rows.append([{"text": "展开全部历史数据", "callback_data": "usage_fee:expand"}])
+        rows.append([{"text": "🏠 返回主菜单", "callback_data": "menu:home"}])
+        return build_inline_keyboard(rows)
 
     def build_instances_keyboard(self, data: Dict[str, Any], page: int = 1) -> Optional[Dict[str, Any]]:
         pagination = _paginate_items(data.get("items", []), page=page, page_size=self.instance_page_size)
@@ -530,16 +607,13 @@ class TelegramBotRunner:
         ])
 
     def _register_netsec_flow(self, action: str, instance_ref: str, port: str, source_cidr: str, back_page: int = 1) -> str:
-        raw = f"{action}|{instance_ref}|{port}|{source_cidr}|{back_page}"
-        token = f"nf{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:16]}"
-        self.netsec_flow_refs[token] = {
+        return self._new_callback_state(self.netsec_flow_refs, "nf", {
             "action": action,
             "instance_ref": str(instance_ref),
             "port": str(port),
             "source_cidr": str(source_cidr),
             "back_page": int(back_page),
-        }
-        return token
+        })
 
     def _selection_session_key(self, instance_ref: str, back_page: int, page: int) -> str:
         return f"{str(instance_ref)}|{int(back_page)}|{int(page)}"
@@ -562,21 +636,15 @@ class TelegramBotRunner:
 
     def _register_rule_selection(self, instance_ref: str, rule_keys: List[str], back_page: int = 1, page: int = 1) -> str:
         normalized_keys = sorted({str(item).strip() for item in list(rule_keys or []) if str(item).strip()})
-        raw = f"{instance_ref}|{back_page}|{page}|{'|'.join(normalized_keys)}"
-        token = f"rs{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:16]}"
-        self.rule_select_refs[token] = {
+        return self._new_callback_state(self.rule_select_refs, "rs", {
             "instance_ref": str(instance_ref),
             "rule_keys": normalized_keys,
             "back_page": int(back_page),
             "page": int(page),
-        }
-        return token
+        })
 
     def _resolve_rule_selection(self, token: str) -> Dict[str, Any]:
-        state = self.rule_select_refs.get(token)
-        if not state:
-            raise ValueError("规则选择会话已失效，请重新进入临时规则管理")
-        return dict(state)
+        return self._resolve_callback_state(self.rule_select_refs, token, "规则选择会话已失效，请重新进入临时规则管理")
 
     def _toggle_rule_selection(self, instance_ref: str, rule_key: str, back_page: int = 1, page: int = 1) -> Dict[str, Any]:
         session = self._get_rule_selection_session(instance_ref, back_page=back_page, page=page)
@@ -642,14 +710,13 @@ class TelegramBotRunner:
         return build_inline_keyboard(rows)
 
     def _resolve_netsec_flow(self, token: str) -> Dict[str, Any]:
-        flow = self.netsec_flow_refs.get(token)
-        if not flow:
-            raise ValueError("网络/安全会话已失效，请重新进入该流程")
-        return dict(flow)
+        return self._resolve_callback_state(self.netsec_flow_refs, token, "网络/安全会话已失效，请重新进入该流程")
 
     def build_netsec_preview_keyboard(self, action: str, instance_ref: str, port: str, source_cidr: str, back_page: int = 1) -> Dict[str, Any]:
         self._remember_instance_like(instance_ref)
-        action_label = "确认放行" if action == "open" else "确认清理"
+        allowed_ports = {int(item) for item in self.network_runtime.get("quick_open_allowed_tcp_ports", [])}
+        is_custom_port = int(port) not in allowed_ports
+        action_label = ("⚠️ 二次确认放行" if is_custom_port and action == "open" else "✅ 确认放行") if action == "open" else ("⚠️ 二次确认清理" if is_custom_port else "✅ 确认清理")
         action_icon = "✅" if action == "open" else "🧹"
         flow_token = self._register_netsec_flow(action, instance_ref, str(port), source_cidr, back_page)
         return build_inline_keyboard([
@@ -728,7 +795,9 @@ class TelegramBotRunner:
             parts = normalized.split(maxsplit=1)
             if len(parts) < 2:
                 return "请提供要删除的策略名称，例如：<code>/delete_policy NeverExpireStandard</code>"
-            return capture_output(delete_policy, self.app_config, parts[1].strip(), True)
+            target = parts[1].strip()
+            token = self._register_dangerous_action("delete_policy", target)
+            return self._dangerous_confirmation_text("delete_policy", target)
         if normalized.startswith("/instances"):
             return render_instances_telegram(list_instances_data(self.app_config), page=1, page_size=self.instance_page_size)
         if normalized.startswith("/instance_detail"):
@@ -745,12 +814,14 @@ class TelegramBotRunner:
             instance_ref = self._extract_tail_argument(normalized)
             if not instance_ref:
                 return "请提供实例名称或 OCID，例如：<code>/instance_stop my-vm</code>"
-            return render_instance_action_telegram(execute_instance_action_data("stop", instance_ref, self.app_config))
+            self._register_dangerous_action("instance_stop", instance_ref)
+            return self._dangerous_confirmation_text("instance_stop", instance_ref)
         if normalized.startswith("/instance_restart"):
             instance_ref = self._extract_tail_argument(normalized)
             if not instance_ref:
                 return "请提供实例名称或 OCID，例如：<code>/instance_restart my-vm</code>"
-            return render_instance_action_telegram(execute_instance_action_data("restart", instance_ref, self.app_config))
+            self._register_dangerous_action("instance_restart", instance_ref)
+            return self._dangerous_confirmation_text("instance_restart", instance_ref)
         if normalized.startswith("/instance_network"):
             instance_ref = self._extract_tail_argument(normalized)
             if not instance_ref:
@@ -788,6 +859,8 @@ class TelegramBotRunner:
         return parts[1].strip() if len(parts) > 1 else ""
 
     def handle_run_action(self, action: str) -> str:
+        action_name, args = parse_action(action)
+        action = action_name if not args else ":".join((action_name, *args))
         if action == "user_info":
             return render_user_info_telegram(get_user_info_data(self.app_config))
         if action == "usage_fee":
@@ -923,7 +996,6 @@ class TelegramBotRunner:
     def build_start_card_text(self) -> str:
         return (
             "<b>👋 欢迎使用 OCI Master Telegram Bot！</b>\n"
-            "<blockquote>老项目那种一屏一块的操作感，我给它搬回来了。</blockquote>\n"
             "<b>🚀 快速入口</b>\n"
             "• <code>/menu</code> 查看完整菜单\n"
             "• <code>/policies</code> 进入密码策略菜单\n"
@@ -984,6 +1056,27 @@ class TelegramBotRunner:
 
         raise ValueError("未知策略菜单操作")
 
+    def _handle_usage_fee_callback(self, callback_query_id: str, chat_id: str, message_id: int, data: str) -> bool:
+        """Render the usage-fee expansion/collapse callbacks."""
+        if data not in {"usage_fee:expand", "usage_fee:collapse"}:
+            return False
+        report_data = get_usage_fee_report_data(self.app_config)
+        show_all = data == "usage_fee:expand"
+        text = render_usage_fee_telegram(report_data, show_all=show_all)
+        keyboard = self.build_usage_fee_keyboard(show_all, len(report_data["unique_dates"]), report_data["display_days"])
+        self.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+        self.answer_callback_query(callback_query_id, "已更新显示内容")
+        return True
+
+    def _handle_menu_callback(self, callback_query_id: str, chat_id: str, message_id: int, data: str) -> bool:
+        """Render menu callbacks while keeping callback acknowledgement at the route boundary."""
+        if not data.startswith("menu:"):
+            return False
+        text, keyboard = self._route_menu_callback(data)
+        self.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+        self.answer_callback_query(callback_query_id, "已切换菜单")
+        return True
+
     def handle_callback_query(self, callback_query: Dict[str, Any]) -> None:
         callback_query_id = str(callback_query.get("id", ""))
         data = str(callback_query.get("data", ""))
@@ -1000,25 +1093,43 @@ class TelegramBotRunner:
             return
 
         try:
-            if data in {"usage_fee:expand", "usage_fee:collapse"}:
-                report_data = get_usage_fee_report_data(self.app_config)
-                show_all = data == "usage_fee:expand"
-                text = render_usage_fee_telegram(report_data, show_all=show_all)
-                keyboard = self.build_usage_fee_keyboard(show_all, len(report_data["unique_dates"]), report_data["display_days"])
-                self.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
-                self.answer_callback_query(callback_query_id, "已更新显示内容")
+            if self._handle_usage_fee_callback(callback_query_id, chat_id, message_id, data):
                 return
 
-            if data.startswith("menu:"):
-                text, keyboard = self._route_menu_callback(data)
-                self.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
-                self.answer_callback_query(callback_query_id, "已切换菜单")
+            if self._handle_menu_callback(callback_query_id, chat_id, message_id, data):
                 return
 
             if data.startswith("pm:"):
                 text, keyboard, notice = self._handle_policy_callback(chat_id, user_id, data)
                 self.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="HTML", reply_markup=keyboard)
                 self.answer_callback_query(callback_query_id, notice or "已更新")
+                return
+
+            if data.startswith("danger:confirm:"):
+                action = self._consume_callback_state(
+                    self.dangerous_action_refs,
+                    data.split(":", 2)[2],
+                    "确认会话已失效，请重新发送命令",
+                )
+                target = str(action["target"])
+                if action["action"] == "delete_policy":
+                    result = delete_policy_data(target, self.app_config)
+                    text = render_policy_action_telegram(result)
+                    notice = "策略已删除"
+                else:
+                    verb = str(action["action"]).split("_", 1)[1]
+                    result = execute_instance_action_data(verb, target, self.app_config)
+                    self._remember_instance_like(result["id"], str(result.get("display_name", "")))
+                    text = render_instance_action_telegram(result)
+                    notice = f"已提交{verb}操作"
+                self.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=self.build_main_menu_keyboard(),
+                )
+                self.answer_callback_query(callback_query_id, notice)
                 return
 
             if data.startswith("instance:detail:"):
@@ -1287,7 +1398,7 @@ class TelegramBotRunner:
                 return
 
             if data.startswith("netsec:selectapply:"):
-                selection = self._resolve_rule_selection(data.split(":", 2)[2])
+                selection = self._consume_callback_state(self.rule_select_refs, data.split(":", 2)[2], "规则选择会话已失效，请重新进入临时规则管理")
                 result = apply_cleanup_selected_temp_rules_data(selection["instance_ref"], selection["rule_keys"], self.app_config)
                 self._remember_instance_like(result["instance"])
                 self._clear_rule_selection_session(selection["instance_ref"], back_page=int(selection.get("back_page", 1) or 1), page=int(selection.get("page", 1) or 1))
@@ -1387,7 +1498,7 @@ class TelegramBotRunner:
                 return
 
             if data.startswith("netsec:flowuse:"):
-                flow = self._resolve_netsec_flow(data.split(":", 2)[2])
+                flow = self._consume_callback_state(self.netsec_flow_refs, data.split(":", 2)[2], "网络/安全会话已失效，请重新进入该流程")
                 action = str(flow["action"])
                 instance_ref = str(flow["instance_ref"])
                 port = str(flow["port"])
@@ -1408,7 +1519,7 @@ class TelegramBotRunner:
                 return
 
             if data.startswith("netsec:apply:"):
-                flow = self._resolve_netsec_flow(data.split(":", 2)[2])
+                flow = self._consume_callback_state(self.netsec_flow_refs, data.split(":", 2)[2], "网络/安全会话已失效，请重新进入该流程")
                 action = str(flow["action"])
                 instance_ref = str(flow["instance_ref"])
                 port = str(flow["port"])
@@ -1455,14 +1566,30 @@ class TelegramBotRunner:
             self.answer_callback_query(callback_query_id, "未知操作")
         except Exception as exc:
             self.answer_callback_query(callback_query_id, "操作失败")
-            error_text = f"<b>❌ 操作失败</b>\n<code>{html.escape(str(exc))}</code>"
-            error_keyboard = build_inline_keyboard([[{"text": "🏠 返回主菜单", "callback_data": "menu:home"}]])
-            self.send_message(chat_id=chat_id, text=error_text, parse_mode="HTML", reply_markup=error_keyboard)
+            self._send_generic_error(chat_id)
+
+    def _handle_message_update(self, message: Dict[str, Any], chat_id: str, user_id: str, text: str) -> bool:
+        """Handle message-level routing prerequisites; state/command handlers follow."""
+        if not chat_id or not text:
+            return True
+        if not self.is_authorized(message):
+            self.send_message(chat_id, "❌ 当前 chat/user 未授权执行该 Bot 命令。")
+            return True
+        return False
 
     def process_update(self, update: Dict[str, Any]) -> None:
+        self._update_query_cache.clear()
+        self._process_update(update)
         self.last_update_id = max(self.last_update_id, int(update.get("update_id", 0)))
+        self._update_query_cache.clear()
+
+    def _process_update(self, update: Dict[str, Any]) -> None:
         callback_query = update.get("callback_query")
         if callback_query:
+            callback_message = callback_query.get("message") or {}
+            callback_chat = callback_message.get("chat") or {}
+            callback_user = callback_query.get("from") or {}
+            self._active_callback_owner = (str(callback_chat.get("id", "")), str(callback_user.get("id", "")))
             self.handle_callback_query(callback_query)
             return
 
@@ -1471,12 +1598,9 @@ class TelegramBotRunner:
         chat_id = str(chat.get("id", ""))
         text = message.get("text", "")
         user_id = str((message.get("from") or {}).get("id", ""))
+        self._active_callback_owner = (chat_id, user_id)
 
-        if not chat_id or not text:
-            return
-
-        if not self.is_authorized(message):
-            self.send_message(chat_id, "❌ 当前 chat/user 未授权执行该 Bot 命令。")
+        if self._handle_message_update(message, chat_id, user_id, text):
             return
 
         state = self._get_menu_state(chat_id, user_id)
@@ -1675,9 +1799,9 @@ class TelegramBotRunner:
                 self.send_message(chat_id, render_instances_telegram(instance_data, page=1, page_size=self.instance_page_size), parse_mode="HTML", reply_markup=self.build_instances_keyboard(instance_data, page=1))
                 return
             if text.strip().startswith("/instance_detail"):
-                result = self.handle_command(text)
                 instance_ref = self._extract_tail_argument(text.strip())
                 detail = get_instance_detail_data(instance_ref, self.app_config) if instance_ref else None
+                result = render_instance_detail_telegram(detail) if detail else self.handle_command(text)
                 if detail:
                     self._remember_instance_like(detail)
                 self.send_message(chat_id, result, parse_mode="HTML", reply_markup=self.build_instance_detail_keyboard(detail, back_page=1) if detail else None)
@@ -1747,6 +1871,16 @@ class TelegramBotRunner:
                     self.send_message(chat_id, result, parse_mode="HTML")
                     return
                 action = normalized.split()[0].replace("/instance_", "")
+                if action in {"stop", "restart"}:
+                    action_name = f"instance_{action}"
+                    token = self._register_dangerous_action(action_name, instance_ref)
+                    self.send_message(
+                        chat_id,
+                        self._dangerous_confirmation_text(action_name, instance_ref),
+                        parse_mode="HTML",
+                        reply_markup=self._build_dangerous_confirmation_keyboard(token),
+                    )
+                    return
                 action_result = execute_instance_action_data(action, instance_ref, self.app_config)
                 self._remember_instance_like(action_result["id"], str(action_result.get("display_name", "")))
                 self.send_message(
@@ -1756,13 +1890,28 @@ class TelegramBotRunner:
                     reply_markup=self.build_instance_action_keyboard(str(action_result["id"]), back_page=1),
                 )
                 return
-            if text.strip().startswith(("/help", "/run", "/delete_policy")):
+            if text.strip().startswith("/delete_policy"):
+                normalized = text.strip()
+                parts = normalized.split(maxsplit=1)
+                if len(parts) < 2:
+                    self.send_message(chat_id, self.handle_command(normalized), parse_mode="HTML")
+                    return
+                target = parts[1].strip()
+                token = self._register_dangerous_action("delete_policy", target)
+                self.send_message(
+                    chat_id,
+                    self._dangerous_confirmation_text("delete_policy", target),
+                    parse_mode="HTML",
+                    reply_markup=self._build_dangerous_confirmation_keyboard(token),
+                )
+                return
+            if text.strip().startswith(("/help", "/run")):
                 result = self.handle_command(text)
                 self.send_message(chat_id, result or "✅ 命令执行完成，但无返回内容。", parse_mode="HTML")
                 return
             result = self.handle_command(text)
         except Exception as exc:
-            result = f"<b>❌ 命令执行失败</b>\n<code>{html.escape(str(exc))}</code>"
+            result = "<b>❌ 命令执行失败</b>\n请求未完成，请稍后重试。"
 
         parse_mode = "HTML" if any(tag in result for tag in ("<b>", "<code>", "<blockquote>", "<i>", "&lt;")) else None
         self.send_message(chat_id, result or "✅ 命令执行完成，但无返回内容。", parse_mode=parse_mode)
@@ -1770,6 +1919,10 @@ class TelegramBotRunner:
     def run_polling(self) -> None:
         self.validate()
         self.refresh_bot_commands()
+        if not self._startup_notice_sent:
+            for chat_id in self.allowed_chat_ids:
+                self.send_message(chat_id, "⚠️ Bot 服务已重启，旧的按钮流程已失效。请重新打开菜单；未重新确认的危险操作不会执行。")
+            self._startup_notice_sent = True
         print("🤖 Telegram Bot 命令菜单已同步到 Telegram 客户端。")
         print("🤖 Telegram Bot 已启动，正在轮询消息...")
         print("按 Ctrl+C 可停止 Bot。")
@@ -1779,8 +1932,8 @@ class TelegramBotRunner:
                 for update in updates:
                     self.process_update(update)
             except requests.RequestException as exc:
-                print(f"⚠️ Telegram 网络请求失败: {exc}")
+                print("⚠️ Telegram 网络请求失败，请稍后重试。")
                 time.sleep(self.poll_interval)
             except Exception as exc:
-                print(f"⚠️ Telegram 处理异常: {exc}")
+                print("⚠️ Telegram 处理异常，请稍后重试。")
                 time.sleep(self.poll_interval)

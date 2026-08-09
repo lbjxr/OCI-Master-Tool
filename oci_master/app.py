@@ -26,6 +26,7 @@ from oci_master.services.tenant_insights import (
     show_region_subscriptions,
 )
 from oci_master.services.user_info import get_user_info
+from oci_master.action_dispatch import parse_action
 from oci_master.telegram_bot import TelegramBotRunner
 
 
@@ -120,6 +121,8 @@ def parse_args(argv: List[str]) -> Tuple[str, Optional[str]]:
 
 
 def execute_action(action: str, app_config: Dict[str, object]) -> None:
+    action_name, args = parse_action(action)
+    action = action_name if not args else ":".join((action_name, *args))
     if action == "user_info":
         get_user_info(app_config)
     elif action == "usage_fee":

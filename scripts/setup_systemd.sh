@@ -4,12 +4,14 @@ set -euo pipefail
 INSTALL_DIR=""
 CONFIG_PATH=""
 SERVICE_NAME="oci-master-telegram"
-RUN_USER="root"
+RUN_USER="oci-master"
 ENV_FILE="/etc/oci-master.env"
 ENABLE_NOW=0
 SYSTEMD_DIR="/etc/systemd/system"
 DRY_RUN=0
-PYTHON_BIN="/usr/bin/python3"
+BASE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-$BASE_DIR/.venv/bin/python}"
+READ_ONLY_PATHS="${READ_ONLY_PATHS:-$BASE_DIR /etc/oci-master}"
 
 usage() {
   cat <<'EOF'
@@ -22,12 +24,13 @@ usage() {
 
 可选参数:
   --service-name NAME      systemd 服务名(默认: oci-master-telegram)
-  --user USER              运行服务的系统用户(默认: root)
+  --user USER              运行服务的系统用户(默认: oci-master)
   --env-file PATH          EnvironmentFile 路径(默认: /etc/oci-master.env)
   --enable-now             生成后执行 daemon-reload 并 enable --now
   --systemd-dir DIR        service 文件输出目录(默认: /etc/systemd/system)
   --python-bin PATH        Python 可执行文件(默认: /usr/bin/python3)
-  --dry-run                仅生成/覆盖目标文件，不执行 systemctl
+  --read-only-paths PATHS  只读路径(默认: 项目目录和 /etc/oci-master)
+  --dry-run                仅显示目标路径、service 内容和将执行的动作，不写文件、不执行 systemctl
   -h, --help               显示帮助
 EOF
 }
@@ -82,6 +85,11 @@ while [[ $# -gt 0 ]]; do
       PYTHON_BIN="$2"
       shift 2
       ;;
+    --read-only-paths)
+      require_value "$1" "${2-}"
+      READ_ONLY_PATHS="$2"
+      shift 2
+      ;;
     --enable-now)
       ENABLE_NOW=1
       shift
@@ -130,14 +138,7 @@ if [[ "$DRY_RUN" -eq 0 && "$SYSTEMD_DIR" != "/etc/systemd/system" ]]; then
   log "请确认这是你的预期目录。若只是演练，建议追加 --dry-run"
 fi
 
-mkdir -p "$SYSTEMD_DIR"
-
-if [[ -e "$SERVICE_FILE" ]]; then
-  cp -a "$SERVICE_FILE" "$BACKUP_FILE"
-  log "已备份现有 service: $BACKUP_FILE"
-fi
-
-cat > "$SERVICE_FILE" <<EOF
+SERVICE_CONTENT=$(cat <<EOF
 [Unit]
 Description=OCI Master Telegram runner
 After=network-online.target
@@ -156,17 +157,36 @@ TimeoutStopSec=15
 StandardOutput=journal
 StandardError=journal
 User=$RUN_USER
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=$READ_ONLY_PATHS
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
-log "已生成 service 文件: $SERVICE_FILE"
+)
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
-  log "dry-run 模式: 跳过 systemctl daemon-reload / enable"
+  log "dry-run: 不创建目录、不备份、不写入 service 文件、不执行 systemctl"
+  printf '%s\n' "目标 service: $SERVICE_FILE"
+  printf '%s\n' "目标备份: $BACKUP_FILE"
+  printf '%s\n' '--- service 内容 ---'
+  printf '%s\n' "$SERVICE_CONTENT"
   exit 0
 fi
+
+mkdir -p "$SYSTEMD_DIR"
+
+if [[ -e "$SERVICE_FILE" ]]; then
+  cp -a "$SERVICE_FILE" "$BACKUP_FILE"
+  log "已备份现有 service: $BACKUP_FILE"
+fi
+
+printf '%s\n' "$SERVICE_CONTENT" > "$SERVICE_FILE"
+
+log "已生成 service 文件: $SERVICE_FILE"
 
 systemctl daemon-reload
 log "已执行: systemctl daemon-reload"
